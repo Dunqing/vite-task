@@ -464,17 +464,29 @@ fn run_case(
             let argv = step.argv();
 
             let program = argv[0].as_str();
+            let step_cwd = e2e_stage_path.join(step.cwd().unwrap_or(&e2e.cwd));
             // Resolve the locally built task binaries exactly. Other programs
             // are resolved through the prepared PATH, allowing ignored tests
             // to opt into external toolchains without weakening the default
-            // suite's self-contained execution.
-            let mut cmd = if matches!(program, "vt" | "vtt") {
+            // suite's self-contained execution. They're resolved like `vp`
+            // resolves task programs: portable-pty's own search on Windows
+            // prefers an exact name over `PATHEXT` extensions, so it would
+            // pick an extensionless shell shim such as `node_modules/.bin/pnpm`
+            // over `pnpm.cmd`, which Windows can't execute.
+            //
+            // `canonicalize` gives the staged workspace a verbatim (`\\?\`)
+            // path on Windows. `cmd.exe`, which runs npm-style `.cmd` shims
+            // such as pnpm's, rejects that as a working directory, so other
+            // programs start in its simplified form.
+            let (mut cmd, spawn_cwd) = if matches!(program, "vt" | "vtt") {
                 let exe_env = vt_str::format!("CARGO_BIN_EXE_{program}");
                 let resolved =
                     env::var_os(exe_env.as_str()).unwrap_or_else(|| panic!("{exe_env} not set"));
-                CommandBuilder::new(resolved)
+                (CommandBuilder::new(resolved), step_cwd.as_path())
             } else {
-                CommandBuilder::new(program)
+                let resolved = which::which_in(program, Some(&e2e_env_path), step_cwd.as_path())
+                    .unwrap_or_else(|err| panic!("failed to resolve {program}: {err}"));
+                (CommandBuilder::new(resolved), dunce::simplified(step_cwd.as_path()))
             };
             for arg in &argv[1..] {
                 cmd.arg(arg.as_str());
@@ -526,8 +538,7 @@ fn run_case(
                 let resolved = resolve_env_placeholder(v.as_str());
                 cmd.env(k.as_str(), AsRef::<OsStr>::as_ref(&resolved));
             }
-            let step_cwd = step.cwd().unwrap_or(&e2e.cwd);
-            cmd.cwd(e2e_stage_path.join(step_cwd).as_path());
+            cmd.cwd(spawn_cwd);
 
             let terminal = TestTerminal::spawn(SCREEN_SIZE, cmd).unwrap();
             let mut killer = terminal.child_handle.clone();
