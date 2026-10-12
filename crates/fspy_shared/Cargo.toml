@@ -15,7 +15,7 @@ bytemuck = { workspace = true, features = ["must_cast", "derive"] }
 fspy_nostd = { workspace = true }
 fspy_nostd_alloc = { workspace = true }
 fspy_shm = { workspace = true }
-fspy_ipc_str = { workspace = true }
+fspy_ipc_str = { workspace = true, features = ["fspy_nostd"] }
 thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 vt_path = { workspace = true }

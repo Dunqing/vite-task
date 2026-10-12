@@ -8,12 +8,15 @@ use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::ffi::OsStringExt as _;
 use std::{borrow::Cow, ffi::OsStr, fmt::Debug, mem::MaybeUninit};
 
+#[cfg(feature = "fspy_nostd")]
 use allocator_api2::alloc::Allocator;
 use bumpalo::Bump;
 #[cfg(windows)]
 use bytemuck::must_cast_slice;
 use bytemuck::{TransparentWrapper, TransparentWrapperAlloc};
+#[cfg(feature = "fspy_nostd")]
 use fspy_nostd::{Fat, OsCStr};
+#[cfg(feature = "fspy_nostd")]
 use fspy_nostd_alloc::OsCString;
 use wincode::{
     SchemaRead, SchemaWrite,
@@ -93,7 +96,11 @@ impl IpcStr {
     pub fn clone_in<'bump>(&self, bump: &'bump Bump) -> &'bump Self {
         Self::wrap_ref(bump.alloc_slice_copy(&self.data))
     }
+}
 
+/// Conversions to and from fspy's C strings.
+#[cfg(feature = "fspy_nostd")]
+impl IpcStr {
     /// Creates an IPC string that borrows the code units of `path`, without
     /// its NUL terminator.
     ///

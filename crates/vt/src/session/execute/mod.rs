@@ -106,6 +106,7 @@ type IpcDriver = LocalBoxFuture<'static, Result<Recorder, vt_server::Error>>;
 
 /// fspy path-tracking state, present only when a cached task needs automatic
 /// input or output inference.
+#[cfg_attr(not(fspy), expect(dead_code, reason = "the globs only filter fspy's accesses"))]
 struct FspyTracking<'a> {
     input_negative_globs: PathGlobSet<'a>,
     output_negative_globs: PathGlobSet<'a>,

@@ -7,12 +7,18 @@ publish = false
 rust-version.workspace = true
 
 [dependencies]
-allocator-api2 = { workspace = true, features = ["alloc"] }
+allocator-api2 = { workspace = true, features = ["alloc"], optional = true }
 bumpalo = { workspace = true }
 bytemuck = { workspace = true, features = ["derive", "extern_crate_alloc", "must_cast"] }
-fspy_nostd = { workspace = true }
-fspy_nostd_alloc = { workspace = true }
+fspy_nostd = { workspace = true, optional = true }
+fspy_nostd_alloc = { workspace = true, optional = true }
 wincode = { workspace = true }
+
+[features]
+# Conversions between `IpcStr` and fspy's C strings. Off by default because
+# fspy_nostd builds only on the platforms fspy supports, while `IpcStr` is
+# used on every platform.
+fspy_nostd = ["dep:allocator-api2", "dep:fspy_nostd", "dep:fspy_nostd_alloc"]
 
 [lints]
 workspace = true

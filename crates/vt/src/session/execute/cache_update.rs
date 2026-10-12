@@ -205,6 +205,10 @@ pub(super) async fn update_cache(
 /// user-configured input negatives, and by tool-reported `ignoreInput` paths.
 /// `path_writes` is filtered by user-configured output negatives and
 /// tool-reported `ignoreOutput` paths before read-write overlap detection.
+#[cfg_attr(
+    not(fspy),
+    expect(clippy::missing_const_for_fn, reason = "the body is a no-op without fspy")
+)]
 fn observe_fspy(
     #[cfg(fspy)] path_accesses: Option<&fspy::PathAccessIterable>,
     metadata: &CacheMetadata,
@@ -300,6 +304,7 @@ fn normalize_ignored_paths(
 
 /// Whether `path` is covered by any `ignored` entry. An ignored entry matches
 /// itself (exact file) and everything under it (directory subtree).
+#[cfg(fspy)]
 fn is_ignored(path: &RelativePathBuf, ignored: &FxHashSet<RelativePathBuf>) -> bool {
     if ignored.is_empty() {
         return false;

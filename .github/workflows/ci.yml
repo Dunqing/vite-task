@@ -67,6 +67,31 @@ jobs:
       # --locked: verify Cargo.lock is up to date (replaces the removed `cargo check --locked`)
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
+  # fspy builds only on Windows, macOS, and Linux, but vp must still build
+  # without it on other platforms. Cross-building `vt_bin` for FreeBSD catches
+  # fspy crates or fspy-only code leaking into its dependency graph. The rest
+  # of the workspace includes the fspy crates, which don't build there.
+  build-freebsd:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.code-changed == 'true'
+    name: Build (freebsd)
+    runs-on: namespace-profile-linux-x64-default
+    steps:
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
+
+      - uses: oxc-project/setup-rust@3d6fb132fbe7cdcb66bf8ec193911c2945369d12 # v1.0.17
+        with:
+          save-cache: ${{ github.ref_name == 'main' }}
+          cache-key: freebsd
+
+      - run: rustup target add x86_64-unknown-freebsd
+      - run: pipx install cargo-zigbuild
+      # pipx isolates cargo-zigbuild in its own venv, so its ziglang dependency
+      # (which bundles zig) isn't on PATH. Install zig separately.
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+
+      - run: cargo-zigbuild build --locked -p vt_bin --target x86_64-unknown-freebsd
+
   test:
     needs: detect-changes
     if: needs.detect-changes.outputs.code-changed == 'true'
@@ -409,6 +434,7 @@ jobs:
     if: always()
     needs:
       - clippy
+      - build-freebsd
       - test
       - test-macos-x64
       - test-musl
