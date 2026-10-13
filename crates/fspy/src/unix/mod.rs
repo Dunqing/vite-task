@@ -128,8 +128,8 @@ impl SpyImpl {
             &mut exec,
             ExecResolveConfig::search_path_enabled(None),
             &encoded_payload,
-            |mode, path| {
-                exec_resolve_accesses.add(PathAccess { mode, path: path.into() });
+            |path| {
+                exec_resolve_accesses.add(PathAccess::Read(path.into()));
             },
         )
         .map_err(|err| SpawnError::Injection(err.into()))?;
