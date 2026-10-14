@@ -51,6 +51,40 @@ async fn metadata() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(all(target_os = "linux", not(target_env = "musl")))]
+#[test(tokio::test)]
+async fn syscall_during_dlopen() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let fifo_path = tmp_dir.path().join("fifo").to_str().unwrap().to_owned();
+    nix::unistd::mkfifo(fifo_path.as_str(), nix::sys::stat::Mode::S_IRWXU).unwrap();
+
+    track_fn!(fifo_path, |fifo_path: String| {
+        // The interposer used to resolve libc's syscall with dlsym, which waits for dlopen,
+        // so a second thread calling syscall waited for the first through futex, re-entering
+        // the interposer until its stack overflowed.
+        fn call_syscall_during_dlopen(fifo_path: &str) {
+            // This waits for dlopen to open the FIFO, which it reads until writers close.
+            let _writer = OpenOptions::new().write(true).open(fifo_path).unwrap();
+            // SAFETY: getpid takes no arguments.
+            unsafe { libc::syscall(libc::SYS_getpid) };
+        }
+        // Opening files and spawning threads can also wait for dlopen, so do both first.
+        File::open("/").unwrap();
+        let path = fifo_path.clone();
+        std::thread::spawn(move || {
+            let c = std::ffi::CString::new(path.as_str()).unwrap();
+            // SAFETY: dlopen fails on the FIFO's empty contents.
+            std::thread::spawn(move || unsafe {
+                libc::dlopen(c.as_ptr(), libc::RTLD_NOW);
+            });
+            call_syscall_during_dlopen(&path);
+        });
+        call_syscall_during_dlopen(&fifo_path);
+    })
+    .await
+    .unwrap();
+}
+
 #[test(tokio::test)]
 async fn readdir() -> anyhow::Result<()> {
     let tmpdir = tempfile::tempdir()?;
