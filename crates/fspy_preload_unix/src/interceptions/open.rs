@@ -101,6 +101,20 @@ unsafe extern "C" fn openat_nocancel(
     }
 }
 
+intercept!(creat(64): unsafe extern "C" fn(path: *const c_char, mode: libc::mode_t) -> c_int);
+unsafe extern "C" fn creat(path: *const c_char, mode: libc::mode_t) -> c_int {
+    // `creat(path, mode)` is `open(path, O_WRONLY | O_CREAT | O_TRUNC, mode)`.
+    // SAFETY: path is a valid C string pointer provided by the caller of the interposed function
+    unsafe {
+        handle_open(
+            fspy_nostd::CStr::from_ptr(path.cast()),
+            OpenFlags(libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC),
+        );
+    }
+    // SAFETY: calling the original libc creat() with the same arguments forwarded from the interposed function
+    unsafe { creat::original()(path, mode) }
+}
+
 intercept!(fopen(64): unsafe extern "C" fn(path: *const c_char, mode: *const c_char) -> *mut FILE);
 unsafe extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> *mut libc::FILE {
     // SAFETY: path and mode are valid C string pointers provided by the caller of the interposed function

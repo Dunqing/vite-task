@@ -44,10 +44,15 @@ impl AccessCollector {
                 result.ok().and_then(|p| p.to_str().map(str::to_owned))
             })
         };
+        let created = |created: bool| if created { " (created)" } else { "" };
         let line = match access {
             PathAccess::Read(path) => relative(path).map(|path| format!("{path}: Read")),
-            PathAccess::Write(path) => relative(path).map(|path| format!("{path}: Write")),
-            PathAccess::ReadWrite(path) => relative(path).map(|path| format!("{path}: ReadWrite")),
+            PathAccess::Write { path, created: was_created } => {
+                relative(path).map(|path| format!("{path}: Write{}", created(was_created)))
+            }
+            PathAccess::ReadWrite { path, created: was_created } => {
+                relative(path).map(|path| format!("{path}: ReadWrite{}", created(was_created)))
+            }
             PathAccess::ReadDir(path) => relative(path).map(|path| format!("{path}: ReadDir")),
         };
         self.accesses.extend(line);

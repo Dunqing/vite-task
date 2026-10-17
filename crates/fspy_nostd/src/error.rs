@@ -21,6 +21,7 @@ impl Error {
     pub const INVAL: Self = Self(errno::INVAL);
     pub const NOENT: Self = Self(errno::NOENT);
     pub const NOMEM: Self = Self(errno::NOMEM);
+    pub const NOTDIR: Self = Self(errno::NOTDIR);
     pub const OVERFLOW: Self = Self(errno::OVERFLOW);
     pub const RANGE: Self = Self(errno::RANGE);
 
@@ -87,6 +88,7 @@ mod errno {
     pub const INVAL: i32 = linux_raw_sys::errno::EINVAL.cast_signed();
     pub const NOMEM: i32 = linux_raw_sys::errno::ENOMEM.cast_signed();
     pub const NOENT: i32 = linux_raw_sys::errno::ENOENT.cast_signed();
+    pub const NOTDIR: i32 = linux_raw_sys::errno::ENOTDIR.cast_signed();
     pub const OVERFLOW: i32 = linux_raw_sys::errno::EOVERFLOW.cast_signed();
     pub const RANGE: i32 = linux_raw_sys::errno::ERANGE.cast_signed();
 }
@@ -97,6 +99,7 @@ mod errno {
     pub const INVAL: i32 = libc::EINVAL;
     pub const NOMEM: i32 = libc::ENOMEM;
     pub const NOENT: i32 = libc::ENOENT;
+    pub const NOTDIR: i32 = libc::ENOTDIR;
     pub const OVERFLOW: i32 = libc::EOVERFLOW;
     pub const RANGE: i32 = libc::ERANGE;
 }

@@ -9,7 +9,7 @@ use std::{
 
 use fspy::{PathAccess, PathAccessIterable};
 use ntest::test_case;
-use test_utils::assert_contains;
+use test_utils::{assert_contains, created};
 
 fn resolve_runtime(runtime: &str) -> anyhow::Result<(PathBuf, OsString)> {
     let manifest_dir = PathBuf::from(var_os("CARGO_MANIFEST_DIR").unwrap());
@@ -122,7 +122,7 @@ fn create_write_stream(runtime: &str) -> anyhow::Result<()> {
         "try { fs.createWriteStream(process.argv.at(-1)).on('error', () => {}) } catch {}",
         &[file_path.as_os_str()],
     )?;
-    assert_contains(&accesses, file_path.as_path(), PathAccess::Write);
+    assert_contains(&accesses, file_path.as_path(), created);
     Ok(())
 }
 
@@ -140,7 +140,45 @@ fn write_sync(runtime: &str) -> anyhow::Result<()> {
         "try { fs.writeFileSync(process.argv.at(-1), '') } catch {}",
         &[file_path.as_os_str()],
     )?;
-    assert_contains(&accesses, &file_path, PathAccess::Write);
+    assert_contains(&accesses, &file_path, created);
+    Ok(())
+}
+
+#[test_case("node")]
+#[ignore = "requires node"]
+#[cfg_attr(not(target_os = "linux"), test_case("bun"))]
+#[cfg_attr(not(target_os = "linux"), ignore = "requires node")]
+#[cfg_attr(not(target_env = "musl"), test_case("deno"))]
+#[cfg_attr(not(target_env = "musl"), ignore = "requires node")]
+fn mkdir_sync(runtime: &str) -> anyhow::Result<()> {
+    let tmpdir = tempfile::tempdir()?;
+    let dir_path = tmpdir.path().join("hello_dir");
+    let accesses = track_script(
+        runtime,
+        "try { fs.mkdirSync(process.argv.at(-1)) } catch {}",
+        &[dir_path.as_os_str()],
+    )?;
+    assert_contains(&accesses, &dir_path, created);
+    Ok(())
+}
+
+#[test_case("node")]
+#[ignore = "requires node"]
+#[cfg_attr(not(target_os = "linux"), test_case("bun"))]
+#[cfg_attr(not(target_os = "linux"), ignore = "requires node")]
+#[cfg_attr(not(target_env = "musl"), test_case("deno"))]
+#[cfg_attr(not(target_env = "musl"), ignore = "requires node")]
+fn rename_sync(runtime: &str) -> anyhow::Result<()> {
+    let tmpdir = tempfile::tempdir()?;
+    let source = tmpdir.path().join("source");
+    let destination = tmpdir.path().join("destination");
+    std::fs::write(&source, "")?;
+    let accesses = track_script(
+        runtime,
+        "try { fs.renameSync(process.argv.at(-2), process.argv.at(-1)) } catch {}",
+        &[source.as_os_str(), destination.as_os_str()],
+    )?;
+    assert_contains(&accesses, &destination, created);
     Ok(())
 }
 

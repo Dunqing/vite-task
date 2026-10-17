@@ -17,8 +17,24 @@ use fspy::{IpcPath, PathAccess, PathAccessIterable};
 )]
 pub use vt_subprocess_test::command_for_fn;
 
+/// Builds the expected record of a write that found its path missing.
+#[expect(clippy::allow_attributes, reason = "not every test file writes files")]
+#[allow(dead_code, reason = "not every test file writes files")]
+pub const fn created(path: &IpcPath) -> PathAccess<'_> {
+    PathAccess::Write { path, created: true }
+}
+
+/// Builds the expected record of a write to a path that already existed, or
+/// that the call could not have created.
+#[expect(clippy::allow_attributes, reason = "not every test file writes files")]
+#[allow(dead_code, reason = "not every test file writes files")]
+pub const fn written(path: &IpcPath) -> PathAccess<'_> {
+    PathAccess::Write { path, created: false }
+}
+
 /// Asserts that `expected_path` was accessed, and only as `expected` (a
-/// variant such as `PathAccess::Read`).
+/// variant such as `PathAccess::Read`, or a closure building one with
+/// named fields).
 ///
 /// # Panics
 ///
@@ -27,7 +43,7 @@ pub use vt_subprocess_test::command_for_fn;
 pub fn assert_contains<'a>(
     accesses: &'a PathAccessIterable,
     expected_path: &Path,
-    expected: fn(&'a IpcPath) -> PathAccess<'a>,
+    expected: impl Fn(&'a IpcPath) -> PathAccess<'a>,
 ) {
     // Each access to the path, paired with what it was expected to be.
     let mut path_accesses = Vec::new();

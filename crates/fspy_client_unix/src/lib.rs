@@ -11,7 +11,7 @@ pub mod raw_exec;
 use std::{ffi::OsStr, fmt::Debug, os::unix::ffi::OsStrExt as _, path::Path};
 
 use allocator_api2::alloc::Allocator;
-use convert::{ToAbsolutePath, ToAccessMode};
+use convert::{Access, ToAbsolutePath, ToAccessMode};
 use fspy_shared::ipc::{AccessMode, channel::Sender};
 use fspy_shared_unix::{
     exec::ExecResolveConfig,
@@ -71,7 +71,7 @@ impl<'a> Client<'a> {
         Self { encoded_payload, ipc_sender }
     }
 
-    fn send(&self, mode: AccessMode, path: &Path) {
+    fn send(&self, mode: AccessMode, created: bool, path: &Path) {
         let Some(ipc_sender) = &self.ipc_sender else {
             return;
         };
@@ -84,7 +84,7 @@ impl<'a> Client<'a> {
         }
         // The interception proceeds whether or not the record could be
         // sent — a preload library can never panic its host process.
-        ipc_sender.send(&mode.with_path(path.into()));
+        ipc_sender.send(&mode.with_path(path.into(), created));
     }
 
     /// Resolves and reports an exec before forwarding its transformed arguments.
@@ -110,12 +110,18 @@ impl<'a> Client<'a> {
         // null-terminated arrays, as provided by the caller.
         let mut exec = unsafe { raw_exec.to_exec() };
         let pre_exec = handle_exec(&mut exec, config, &self.encoded_payload, |path| {
-            self.send(AccessMode::Read, path);
+            self.send(AccessMode::Read, false, path);
         })?;
         RawExec::from_exec(exec, allocator, |raw_command| f(raw_command, pre_exec))
     }
 
     /// Resolves and reports one intercepted file access.
+    ///
+    /// A call that may create its path (see [`convert::Access::may_create`])
+    /// is recorded as creating it when the path does not exist at this
+    /// point, right before the call. A check that fails for another reason
+    /// counts as existing: a path wrongly recorded as pre-existing is held
+    /// to its exact state later, which is the stricter mistake.
     ///
     /// # Safety
     ///
@@ -133,11 +139,13 @@ impl<'a> Client<'a> {
     ) -> anyhow::Result<()> {
         // SAFETY: mode contains a valid pointer (if ModeStr) or a plain value,
         // as provided by the caller.
-        let mode = unsafe { mode.to_access_mode() };
+        let Access { mode, may_create } = unsafe { mode.to_access_mode() };
         let Some(abs_path) = path.to_absolute_path(&allocator)? else {
             return Ok(());
         };
-        self.send(mode, Path::new(OsStr::from_bytes(abs_path.as_units())));
+        let created = may_create
+            && matches!(fspy_nostd::fs::exists_at(fspy_nostd::CWD, abs_path.as_thin()), Ok(false));
+        self.send(mode, created, Path::new(OsStr::from_bytes(abs_path.as_units())));
         Ok(())
     }
 }

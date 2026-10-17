@@ -8,7 +8,7 @@ use std::{
 
 use fspy::PathAccess;
 use test_log::test;
-use test_utils::assert_contains;
+use test_utils::{assert_contains, created, written};
 
 #[test(tokio::test)]
 async fn open_read() -> anyhow::Result<()> {
@@ -30,7 +30,125 @@ async fn open_write() -> anyhow::Result<()> {
         let _ = OpenOptions::new().write(true).open(tmp_path_str);
     })
     .await?;
-    assert_contains(&accesses, tmp_path.as_path(), PathAccess::Write);
+    // Without `O_CREAT` the open cannot create the file, so it is not a
+    // creating write even though the file is missing.
+    assert_contains(&accesses, tmp_path.as_path(), written);
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn create_missing_file() -> anyhow::Result<()> {
+    let tmp_dir = tempfile::tempdir()?;
+    let tmp_path = tmp_dir.path().join("hello");
+    let accesses = track_fn!(tmp_path.to_str().unwrap().to_owned(), |tmp_path: String| {
+        File::create(tmp_path).unwrap();
+    })
+    .await?;
+    assert_contains(&accesses, tmp_path.as_path(), created);
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn create_existing_file() -> anyhow::Result<()> {
+    let tmp_dir = tempfile::tempdir()?;
+    let tmp_path = tmp_dir.path().join("hello");
+    File::create(&tmp_path)?;
+    let accesses = track_fn!(tmp_path.to_str().unwrap().to_owned(), |tmp_path: String| {
+        File::create(tmp_path).unwrap();
+    })
+    .await?;
+    assert_contains(&accesses, tmp_path.as_path(), written);
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn create_dir() -> anyhow::Result<()> {
+    let tmp_dir = tempfile::tempdir()?;
+    let dir_path = tmp_dir.path().join("hello_dir");
+    let accesses = track_fn!(dir_path.to_str().unwrap().to_owned(), |dir_path: String| {
+        fs::create_dir(dir_path).unwrap();
+    })
+    .await?;
+    assert_contains(&accesses, dir_path.as_path(), created);
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn rename_destination() -> anyhow::Result<()> {
+    let tmp_dir = tempfile::tempdir()?;
+    let source = tmp_dir.path().join("source");
+    let destination = tmp_dir.path().join("destination");
+    File::create(&source)?;
+    let accesses = track_fn!(tmp_dir.path().to_str().unwrap().to_owned(), |dir: String| {
+        let dir = std::path::Path::new(&dir);
+        fs::rename(dir.join("source"), dir.join("destination")).unwrap();
+    })
+    .await?;
+    assert_contains(&accesses, destination.as_path(), created);
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn rename_over_existing_destination() -> anyhow::Result<()> {
+    let tmp_dir = tempfile::tempdir()?;
+    let source = tmp_dir.path().join("source");
+    let destination = tmp_dir.path().join("destination");
+    File::create(&source)?;
+    File::create(&destination)?;
+    let accesses = track_fn!(tmp_dir.path().to_str().unwrap().to_owned(), |dir: String| {
+        let dir = std::path::Path::new(&dir);
+        fs::rename(dir.join("source"), dir.join("destination")).unwrap();
+    })
+    .await?;
+    assert_contains(&accesses, destination.as_path(), written);
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn hard_link_destination() -> anyhow::Result<()> {
+    let tmp_dir = tempfile::tempdir()?;
+    let original = tmp_dir.path().join("original");
+    let link = tmp_dir.path().join("link");
+    File::create(&original)?;
+    let accesses = track_fn!(tmp_dir.path().to_str().unwrap().to_owned(), |dir: String| {
+        let dir = std::path::Path::new(&dir);
+        fs::hard_link(dir.join("original"), dir.join("link")).unwrap();
+    })
+    .await?;
+    assert_contains(&accesses, link.as_path(), created);
+
+    Ok(())
+}
+
+/// Creating a symlink on Windows needs a privilege that test runners lack.
+#[cfg(unix)]
+#[test(tokio::test)]
+async fn symlink_destination() -> anyhow::Result<()> {
+    let tmp_dir = tempfile::tempdir()?;
+    let link = tmp_dir.path().join("link");
+    let accesses = track_fn!(link.to_str().unwrap().to_owned(), |link: String| {
+        std::os::unix::fs::symlink("target", link).unwrap();
+    })
+    .await?;
+    assert_contains(&accesses, link.as_path(), created);
+    // The target is stored as text, not accessed.
+    assert!(
+        !accesses.iter().any(|access| {
+            access.paths().any(|path| {
+                path.strip_path_prefix(tmp_dir.path().join("target"), |stripped| {
+                    stripped.is_ok_and(|rest| rest.as_os_str().is_empty())
+                })
+            })
+        }),
+        "the symlink target is not an access: {:?}",
+        accesses.iter().collect::<Vec<_>>()
+    );
 
     Ok(())
 }

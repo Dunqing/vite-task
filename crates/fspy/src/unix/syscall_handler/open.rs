@@ -22,6 +22,12 @@ impl SyscallHandler {
         self.handle_open(caller, dir_fd, path, flags)
     }
 
+    /// `creat(path, mode)` is `open(path, O_WRONLY | O_CREAT | O_TRUNC, mode)`.
+    #[cfg(target_arch = "x86_64")]
+    pub(super) fn creat(&mut self, caller: Caller, (path,): (CStrPtr,)) -> io::Result<()> {
+        self.handle_open(caller, Fd::cwd(), path, libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC)
+    }
+
     pub(super) fn openat2(
         &mut self,
         caller: Caller,

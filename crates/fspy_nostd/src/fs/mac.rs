@@ -53,6 +53,22 @@ pub(super) fn unlinkat<R>(dirfd: BorrowedFd<'_>, path: CStr<'_, R>, flags: AtFla
     if result == -1 { Err(Error::last_os_error()) } else { Ok(()) }
 }
 
+#[expect(clippy::needless_pass_by_value, reason = "CStr is a borrowed value type")]
+pub(super) fn stat_nofollow<R>(dirfd: BorrowedFd<'_>, path: CStr<'_, R>) -> Result<()> {
+    let mut raw = core::mem::MaybeUninit::<libc::stat>::zeroed();
+    // SAFETY: `dirfd` remains borrowed, `path` is NUL-terminated for the
+    // call, and `raw` is writable for it.
+    let result = unsafe {
+        libc::fstatat(
+            dirfd.as_raw_fd(),
+            path.as_ptr().cast(),
+            raw.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result == -1 { Err(Error::last_os_error()) } else { Ok(()) }
+}
+
 pub(super) fn fstat(fd: BorrowedFd<'_>) -> Result<Stat> {
     let mut raw = core::mem::MaybeUninit::<libc::stat>::zeroed();
     // SAFETY: `fd` remains borrowed and `raw` is writable for the call.

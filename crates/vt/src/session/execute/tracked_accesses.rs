@@ -44,12 +44,12 @@ impl TrackedPathAccesses {
                         accesses.add_read(path);
                     }
                 }
-                PathAccess::Write(path) => {
+                PathAccess::Write { path, .. } => {
                     if let Some(path) = relative_path(path) {
                         accesses.path_writes.insert(path);
                     }
                 }
-                PathAccess::ReadWrite(path) => {
+                PathAccess::ReadWrite { path, .. } => {
                     if let Some(path) = relative_path(path) {
                         accesses.add_read(path.clone());
                         accesses.path_writes.insert(path);

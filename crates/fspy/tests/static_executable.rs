@@ -62,13 +62,16 @@ async fn open_read() {
 #[test(tokio::test)]
 async fn open_write() {
     let accesses = track_test_bin(&["open_write", "/hello"], None).await;
-    assert_contains(&accesses, Path::new("/hello"), fspy::PathAccess::Write);
+    assert_contains(&accesses, Path::new("/hello"), test_utils::written);
 }
 
 #[test(tokio::test)]
 async fn open_readwrite() {
     let accesses = track_test_bin(&["open_readwrite", "/hello"], None).await;
-    assert_contains(&accesses, Path::new("/hello"), fspy::PathAccess::ReadWrite);
+    assert_contains(&accesses, Path::new("/hello"), |path| fspy::PathAccess::ReadWrite {
+        path,
+        created: false,
+    });
 }
 
 #[test(tokio::test)]
@@ -80,13 +83,72 @@ async fn openat2_read() {
 #[test(tokio::test)]
 async fn openat2_write() {
     let accesses = track_test_bin(&["openat2_write", "/hello"], None).await;
-    assert_contains(&accesses, Path::new("/hello"), fspy::PathAccess::Write);
+    assert_contains(&accesses, Path::new("/hello"), test_utils::written);
 }
 
 #[test(tokio::test)]
 async fn openat2_readwrite() {
     let accesses = track_test_bin(&["openat2_readwrite", "/hello"], None).await;
-    assert_contains(&accesses, Path::new("/hello"), fspy::PathAccess::ReadWrite);
+    assert_contains(&accesses, Path::new("/hello"), |path| fspy::PathAccess::ReadWrite {
+        path,
+        created: false,
+    });
+}
+
+#[test(tokio::test)]
+async fn create_missing_file() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let path = tmp_dir.path().join("hello");
+    let accesses = track_test_bin(&["create", path.to_str().unwrap()], None).await;
+    assert_contains(&accesses, &path, test_utils::created);
+}
+
+#[test(tokio::test)]
+async fn create_existing_file() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let path = tmp_dir.path().join("hello");
+    fs::write(&path, "").unwrap();
+    let accesses = track_test_bin(&["create", path.to_str().unwrap()], None).await;
+    assert_contains(&accesses, &path, test_utils::written);
+}
+
+#[test(tokio::test)]
+async fn mkdir() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let path = tmp_dir.path().join("hello_dir");
+    let accesses = track_test_bin(&["mkdir", path.to_str().unwrap()], None).await;
+    assert_contains(&accesses, &path, test_utils::created);
+}
+
+#[test(tokio::test)]
+async fn rename_destination() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let source = tmp_dir.path().join("source");
+    let destination = tmp_dir.path().join("destination");
+    fs::write(&source, "").unwrap();
+    let accesses =
+        track_test_bin(&["rename", source.to_str().unwrap(), destination.to_str().unwrap()], None)
+            .await;
+    assert_contains(&accesses, &destination, test_utils::created);
+}
+
+#[test(tokio::test)]
+async fn link_destination() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let original = tmp_dir.path().join("original");
+    let link = tmp_dir.path().join("link");
+    fs::write(&original, "").unwrap();
+    let accesses =
+        track_test_bin(&["link", original.to_str().unwrap(), link.to_str().unwrap()], None).await;
+    assert_contains(&accesses, &link, test_utils::created);
+}
+
+#[test(tokio::test)]
+async fn symlink_destination() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let link = tmp_dir.path().join("link");
+    let accesses = track_test_bin(&["symlink", "target", link.to_str().unwrap()], None).await;
+    assert_contains(&accesses, &link, test_utils::created);
 }
 
 #[test(tokio::test)]

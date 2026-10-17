@@ -35,7 +35,7 @@ async fn open_write() -> anyhow::Result<()> {
         );
     })
     .await?;
-    assert_contains(&accesses, tmp_path.as_path(), PathAccess::Write);
+    assert_contains(&accesses, tmp_path.as_path(), test_utils::written);
 
     Ok(())
 }

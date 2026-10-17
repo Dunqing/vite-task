@@ -2,6 +2,14 @@
 
 Run a command and capture all the paths it tries to access.
 
+## What is recorded
+
+Each record (`fspy_shared::ipc::PathAccess`) is a path with how it was accessed: `Read` (opened for reading, stat'ed, checked, or executed), `Write`, `ReadWrite`, or `ReadDir` (its entries were listed). Calls are recorded whether or not they succeed.
+
+A write also carries whether the path was **created**: it did not exist right before the call. On Unix, the clients check the path with one `lstat` before a call that can create it (`open` with `O_CREAT`, `mkdir`, and the destinations of `rename`, `link` and `symlink`). The seccomp supervisor does the same check, since its notification arrives before the syscall runs. On Windows, `NtCreateFile` reports it in its status block (`FILE_CREATED`), and rename and link destinations passed to `NtSetInformationFile` are checked before the call.
+
+The destination of a rename, hard link or symlink is a write; the source needs no record, and a symlink's target is stored as text, not accessed. Deletions are not recorded.
+
 ## macOS/Linux (glibc) implementation
 
 It uses `DYLD_INSERT_LIBRARIES` on macOS and `LD_PRELOAD` on Linux to inject a shared library that intercepts file system calls.

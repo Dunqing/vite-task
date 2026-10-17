@@ -194,45 +194,69 @@ impl ToAbsolutePath for fspy_nostd::CStr<'_, fspy_nostd::Thin> {
     }
 }
 
+/// What an intercepted call does to its path, before the path is resolved.
+#[derive(Debug, Clone, Copy)]
+pub struct Access {
+    pub mode: AccessMode,
+    /// The call creates the path when it does not exist, so the client
+    /// checks whether it does right before the call.
+    pub may_create: bool,
+}
+
+impl Access {
+    /// A write that creates its path when it does not exist: `mkdir`, and
+    /// the destination of `rename`, `link` and `symlink`.
+    pub const CREATE: Self = Self { mode: AccessMode::Write, may_create: true };
+}
+
 pub trait ToAccessMode {
-    /// Converts the intercepted operation's mode into an access mode.
+    /// Converts the intercepted operation's mode into an access.
     ///
     /// # Safety
     ///
     /// Implementations backed by raw process pointers require those pointers
     /// to remain valid for the conversion.
-    unsafe fn to_access_mode(self) -> AccessMode;
+    unsafe fn to_access_mode(self) -> Access;
 }
 
 impl ToAccessMode for AccessMode {
-    unsafe fn to_access_mode(self) -> AccessMode {
+    unsafe fn to_access_mode(self) -> Access {
+        Access { mode: self, may_create: false }
+    }
+}
+
+impl ToAccessMode for Access {
+    unsafe fn to_access_mode(self) -> Access {
         self
     }
 }
 
 pub struct OpenFlags(pub c_int);
 impl ToAccessMode for OpenFlags {
-    unsafe fn to_access_mode(self) -> AccessMode {
-        match self.0 & libc::O_ACCMODE {
+    unsafe fn to_access_mode(self) -> Access {
+        let mode = match self.0 & libc::O_ACCMODE {
             libc::O_RDWR => AccessMode::ReadWrite,
             libc::O_WRONLY => AccessMode::Write,
             _ => AccessMode::Read,
-        }
+        };
+        Access { mode, may_create: self.0 & libc::O_CREAT != 0 }
     }
 }
 
 pub struct ModeStr(pub *const c_char);
 impl ToAccessMode for ModeStr {
-    unsafe fn to_access_mode(self) -> AccessMode {
+    unsafe fn to_access_mode(self) -> Access {
         // SAFETY: self.0 is a non-null pointer to a valid null-terminated C
         // string, as guaranteed by the libc calling convention.
         let mode_str = unsafe { CStr::from_ptr(self.0) }.to_bytes().as_bstr();
         let has_read = mode_str.contains(&b'r');
         let has_write = mode_str.contains(&b'w') || mode_str.contains(&b'a');
-        match (has_read, has_write) {
+        let mode = match (has_read, has_write) {
             (false, true) => AccessMode::Write,
             (true, true) => AccessMode::ReadWrite,
             _ => AccessMode::Read,
-        }
+        };
+        // `w` and `a` open with `O_CREAT`; `r+` does not.
+        Access { mode, may_create: has_write }
     }
 }

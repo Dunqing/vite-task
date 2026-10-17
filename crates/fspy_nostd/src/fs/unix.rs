@@ -10,7 +10,7 @@ pub use super::linux::readlinkat;
 use super::mac as imp;
 #[cfg(target_os = "macos")]
 pub use super::mac::fcntl_getpath;
-use crate::{BorrowedFd, CStr, Fat, OwnedFd, Result};
+use crate::{BorrowedFd, CStr, Error, Fat, OwnedFd, Result};
 
 type ModeBits = imp::ModeBits;
 
@@ -86,6 +86,21 @@ pub fn unlinkat<R>(dirfd: BorrowedFd<'_>, path: CStr<'_, R>, flags: AtFlags) -> 
 /// Returns the error reported by `fstat`.
 pub fn fstat(fd: BorrowedFd<'_>) -> Result<Stat> {
     imp::fstat(fd)
+}
+
+/// Whether `path`, relative to `dirfd`, names an existing entry. A final
+/// symlink is not followed, so a dangling one exists.
+///
+/// # Errors
+///
+/// Returns the error reported by the stat call, except for the ones that
+/// mean the entry does not exist.
+pub fn exists_at<R>(dirfd: BorrowedFd<'_>, path: CStr<'_, R>) -> Result<bool> {
+    match imp::stat_nofollow(dirfd, path) {
+        Ok(()) => Ok(true),
+        Err(Error::NOENT | Error::NOTDIR) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// Sets the length of an open file.

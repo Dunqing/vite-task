@@ -61,6 +61,26 @@ pub(super) fn unlinkat<R>(dirfd: BorrowedFd<'_>, path: CStr<'_, R>, flags: AtFla
     Ok(())
 }
 
+#[expect(clippy::needless_pass_by_value, reason = "CStr is a borrowed value type")]
+pub(super) fn stat_nofollow<R>(dirfd: BorrowedFd<'_>, path: CStr<'_, R>) -> Result<()> {
+    let mut raw = core::mem::MaybeUninit::<linux_raw_sys::general::statx>::zeroed();
+    // SAFETY: `dirfd` remains borrowed, `path` is NUL-terminated, and `raw`
+    // points to writable storage for the kernel's `statx` structure. Only
+    // the type is requested, which every file system can report.
+    unsafe {
+        syscalls::syscall!(
+            syscalls::Sysno::statx,
+            dirfd.as_raw_fd(),
+            path.as_ptr(),
+            linux_raw_sys::general::AT_SYMLINK_NOFOLLOW,
+            linux_raw_sys::general::STATX_TYPE,
+            raw.as_mut_ptr()
+        )
+    }
+    .map_err(Error::from)?;
+    Ok(())
+}
+
 pub(super) fn fstat(fd: BorrowedFd<'_>) -> Result<Stat> {
     let mut raw = core::mem::MaybeUninit::<linux_raw_sys::general::stat>::zeroed();
     // SAFETY: `fd` remains borrowed and `raw` points to writable storage for

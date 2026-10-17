@@ -10,9 +10,14 @@ fn main() {
 
     use nix::fcntl::{AT_FDCWD, OFlag, OpenHow, openat2};
     let args = std::env::args().collect::<Vec<_>>();
-    assert!(args.len() == 3, "expected 2 arguments: <action> <file_path>");
+    assert!(
+        args.len() == 3 || args.len() == 4,
+        "expected 2 or 3 arguments: <action> <file_path> [<second_path>]"
+    );
     let action = args[1].as_str();
     let path = args[2].as_str();
+    let second_path =
+        || args.get(3).unwrap_or_else(|| panic!("action {action} takes a second path")).as_str();
 
     match action {
         "open_read" => {
@@ -23,6 +28,9 @@ fn main() {
         }
         "open_readwrite" => {
             let _ = File::options().read(true).write(true).open(path);
+        }
+        "create" => {
+            let _ = File::create(path);
         }
         "openat2_read" => {
             let _ = openat2(AT_FDCWD, path, OpenHow::new().flags(OFlag::O_RDONLY));
@@ -42,6 +50,18 @@ fn main() {
         }
         "execve" => {
             let _ = std::process::Command::new(path).spawn();
+        }
+        "mkdir" => {
+            let _ = std::fs::create_dir(path);
+        }
+        "rename" => {
+            let _ = std::fs::rename(path, second_path());
+        }
+        "link" => {
+            let _ = std::fs::hard_link(path, second_path());
+        }
+        "symlink" => {
+            let _ = std::os::unix::fs::symlink(path, second_path());
         }
         _ => panic!("unknown action: {action}"),
     }
