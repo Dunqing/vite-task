@@ -9,10 +9,10 @@ use vt_path::{AbsolutePath, RelativePathBuf};
 use super::{CacheEntryKey, CacheEntryValue, FingerprintMismatch, InputChangeKind};
 
 impl CacheEntryValue {
-    /// Validate explicit inputs, then inferred inputs and tracked environment
-    /// values against `unfiltered_envs`, the execution's
-    /// `CacheMetadata::unfiltered_envs`. Returns the first mismatch, or `None`
-    /// when the entry is valid.
+    /// Validate the checkout path, then explicit inputs, then inferred inputs
+    /// and tracked environment values against `unfiltered_envs`, the
+    /// execution's `CacheMetadata::unfiltered_envs`. Returns the first
+    /// mismatch, or `None` when the entry is valid.
     ///
     /// # Errors
     ///
@@ -23,6 +23,10 @@ impl CacheEntryValue {
         globbed_inputs: &BTreeMap<RelativePathBuf, u64>,
         workspace_root: &AbsolutePath,
     ) -> anyhow::Result<Option<FingerprintMismatch>> {
+        if let Some(mismatch) = self.checkout.mismatch(workspace_root) {
+            return Ok(Some(mismatch));
+        }
+
         if let Some(mismatch) = detect_globbed_input_change(&self.globbed_inputs, globbed_inputs) {
             return Ok(Some(mismatch));
         }

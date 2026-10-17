@@ -7,6 +7,8 @@ use std::{
 
 use vt_path::{AbsolutePath, RelativePathBuf};
 
+use super::checkout::{RootNeedles, RootScanner};
+
 /// Create a tar.zst archive from workspace-relative output paths.
 ///
 /// Of `output_files`, regular files and symlinks are archived (a symlink as
@@ -14,6 +16,9 @@ use vt_path::{AbsolutePath, RelativePathBuf};
 /// are skipped (the task may delete temporary files during execution).
 /// `folders` are archived as directory entries, so a cache hit restores them
 /// even when empty.
+///
+/// Returns whether any archived file contains the workspace root (see
+/// [`super::checkout`]).
 ///
 /// # Errors
 ///
@@ -23,11 +28,13 @@ pub fn create_output_archive(
     output_files: &[RelativePathBuf],
     folders: &[RelativePathBuf],
     archive_path: &AbsolutePath,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let file = File::create(archive_path.as_path())?;
     let encoder = zstd::Encoder::new(file, 0)?.auto_finish();
     let mut builder = tar::Builder::new(encoder);
     builder.follow_symlinks(false);
+    let needles = RootNeedles::new(workspace_root);
+    let mut contains_root = false;
 
     for rel_path in folders {
         let abs_path = workspace_root.join(rel_path);
@@ -51,18 +58,19 @@ pub fn create_output_archive(
             Err(err) => return Err(err.into()),
         };
         if metadata.is_file() {
-            let mut file = File::open(abs_path.as_path())?;
+            let mut file = RootScanner::new(File::open(abs_path.as_path())?, &needles);
             let mut header = tar::Header::new_gnu();
             header.set_metadata(&metadata);
             header.set_cksum();
             builder.append_data(&mut header, rel_path.as_str(), &mut file)?;
+            contains_root |= file.found();
         } else if metadata.is_symlink() {
             builder.append_path_with_name(abs_path.as_path(), rel_path.as_str())?;
         }
     }
 
     builder.finish()?;
-    Ok(())
+    Ok(contains_root)
 }
 
 /// Extract a tar.zst archive, restoring files relative to workspace root.
@@ -123,13 +131,32 @@ mod tests {
         let output = rel("output.txt");
         std::fs::write(dir.join(&output).as_path(), "built\n".repeat(1000)).unwrap();
         let archive_path = dir.join("output.tar.zst");
-        create_output_archive(&dir, &[output], &[], &archive_path).unwrap();
+        assert!(!create_output_archive(&dir, &[output], &[], &archive_path).unwrap());
         let archive = std::fs::read(archive_path.as_path()).unwrap();
         check_output_archive(archive.as_slice()).unwrap();
 
         for corrupt in [&archive[..archive.len() - 1], b"corrupt"] {
             assert!(check_output_archive(corrupt).is_err());
         }
+    }
+
+    /// An output that names the workspace root binds the entry to it.
+    #[test]
+    fn reports_outputs_that_contain_the_workspace_root() {
+        let (_tmp, dir) = temp_workspace();
+        let root = super::super::checkout::RecordedCheckout::root_string(&dir);
+        std::fs::write(dir.join("plain.txt"), "no paths here").unwrap();
+        std::fs::write(
+            dir.join("cache.json"),
+            vt_str::format!("{{\"{root}/src/a.js\": 1}}").as_bytes(),
+        )
+        .unwrap();
+        let archive_path = dir.join("output.tar.zst");
+        assert!(!create_output_archive(&dir, &[rel("plain.txt")], &[], &archive_path).unwrap());
+        assert!(
+            create_output_archive(&dir, &[rel("plain.txt"), rel("cache.json")], &[], &archive_path)
+                .unwrap()
+        );
     }
 
     /// Folders are restored even when empty, and a directory among the
@@ -141,13 +168,15 @@ mod tests {
         std::fs::create_dir_all(dir.join("existing")).unwrap();
         std::fs::write(dir.join("dist/main.js"), "built").unwrap();
         let archive_path = dir.join("output.tar.zst");
-        create_output_archive(
-            &dir,
-            &[rel("dist/main.js"), rel("existing"), rel("gone.txt")],
-            &[rel("dist/empty"), rel("dist")],
-            &archive_path,
-        )
-        .unwrap();
+        assert!(
+            !create_output_archive(
+                &dir,
+                &[rel("dist/main.js"), rel("existing"), rel("gone.txt")],
+                &[rel("dist/empty"), rel("dist")],
+                &archive_path,
+            )
+            .unwrap()
+        );
 
         let (_restored_tmp, restored) = temp_workspace();
         extract_output_archive(&restored, &archive_path).unwrap();
@@ -164,7 +193,7 @@ mod tests {
         std::fs::write(dir.join("real.txt"), "content").unwrap();
         std::os::unix::fs::symlink("real.txt", dir.join("link.txt")).unwrap();
         let archive_path = dir.join("output.tar.zst");
-        create_output_archive(&dir, &[rel("link.txt")], &[], &archive_path).unwrap();
+        assert!(!create_output_archive(&dir, &[rel("link.txt")], &[], &archive_path).unwrap());
 
         let (_restored_tmp, restored) = temp_workspace();
         extract_output_archive(&restored, &archive_path).unwrap();

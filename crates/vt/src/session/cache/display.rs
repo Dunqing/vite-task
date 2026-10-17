@@ -195,6 +195,9 @@ pub fn format_cache_status_inline(cache_status: &CacheStatus) -> Option<Str> {
                 | FingerprintMismatch::TrackedEnvQueryChanged { mismatch, .. } => {
                     vt_str::format!("{mismatch}")
                 }
+                FingerprintMismatch::CheckoutPath { recorded_root } => {
+                    format_checkout_path_str(recorded_root)
+                }
             };
             Some(vt_str::format!("○ cache miss: {reason}, executing"))
         }
@@ -203,6 +206,12 @@ pub fn format_cache_status_inline(cache_status: &CacheStatus) -> Option<Str> {
         }
         CacheStatus::Disabled(_) => Some(Str::from("⊘ cache disabled")),
     }
+}
+
+/// Format an entry bound to another checkout path as a [`Str`] for inline
+/// display.
+pub fn format_checkout_path_str(recorded_root: &str) -> Str {
+    vt_str::format!("outputs embed the checkout path '{recorded_root}'")
 }
 
 /// Format an input change as a [`Str`] for inline display.

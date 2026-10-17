@@ -20,7 +20,7 @@ use super::{
 use crate::{
     collections::HashMap,
     session::{
-        cache::{CacheEntryValue, ExecutionCache, archive},
+        cache::{CacheEntryValue, ExecutionCache, archive, checkout::RecordedCheckout},
         event::{CacheErrorKind, CacheNotUpdatedReason, CacheUpdateStatus, ExecutionError},
     },
 };
@@ -162,8 +162,8 @@ pub(super) async fn update_cache(
         }
     };
 
-    let output_archive = match outputs.archive(workspace_root, cache_dir) {
-        Ok(archive) => archive,
+    let archived = match outputs.archive(workspace_root, cache_dir) {
+        Ok(archived) => archived,
         Err(err) => {
             return (
                 CacheUpdateStatus::NotUpdated(CacheNotUpdatedReason::CacheDisabled),
@@ -177,7 +177,11 @@ pub(super) async fn update_cache(
         std_outputs: std_outputs.into(),
         duration,
         globbed_inputs,
-        output_archive,
+        output_archive: archived.archive,
+        checkout: RecordedCheckout {
+            root: RecordedCheckout::root_string(workspace_root),
+            outputs_contain_root: archived.contain_root,
+        },
     };
     match cache.update(metadata, new_cache_value, cache_dir).await {
         Ok(upload_error) => (CacheUpdateStatus::Updated { upload_error }, None),
@@ -358,6 +362,15 @@ struct Outputs {
     rebuildable: Rebuildable,
 }
 
+/// The archived outputs of a run.
+struct ArchivedOutputs {
+    /// The archive's file name in the cache directory, or `None` when the
+    /// run had no outputs.
+    archive: Option<Str>,
+    /// Whether an archived file contains the workspace root.
+    contain_root: bool,
+}
+
 impl Outputs {
     fn collect(
         cache_metadata: &CacheMetadata,
@@ -401,14 +414,11 @@ impl Outputs {
 
     /// Create a tar.zst archive in the cache directory from the files and the
     /// output folders, so a hit restores those even when empty.
-    ///
-    /// Returns `Some(archive_filename)` if anything was archived, `None` if
-    /// there are no outputs.
     fn archive(
         &self,
         workspace_root: &AbsolutePath,
         cache_dir: &AbsolutePath,
-    ) -> anyhow::Result<Option<Str>> {
+    ) -> anyhow::Result<ArchivedOutputs> {
         let mut files: Vec<RelativePathBuf> = self.files.iter().cloned().collect();
         files.sort();
         let mut folders: Vec<RelativePathBuf> =
@@ -416,15 +426,16 @@ impl Outputs {
         folders.sort();
 
         if files.is_empty() && folders.is_empty() {
-            return Ok(None);
+            return Ok(ArchivedOutputs { archive: None, contain_root: false });
         }
 
         let archive_name: Str = vt_str::format!("{}.tar.zst", uuid::Uuid::new_v4());
         let archive_path = cache_dir.join(archive_name.as_str());
 
-        archive::create_output_archive(workspace_root, &files, &folders, &archive_path)?;
+        let contain_root =
+            archive::create_output_archive(workspace_root, &files, &folders, &archive_path)?;
 
-        Ok(Some(archive_name))
+        Ok(ArchivedOutputs { archive: Some(archive_name), contain_root })
     }
 }
 

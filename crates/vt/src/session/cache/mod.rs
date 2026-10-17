@@ -1,6 +1,7 @@
 //! Execution cache for storing and retrieving cached command results.
 
 pub mod archive;
+pub mod checkout;
 pub mod display;
 pub mod remote;
 mod validation;
@@ -17,8 +18,8 @@ use std::{
 // Re-export display functions for convenience
 pub use display::format_cache_status_inline;
 pub use display::{
-    SpawnFingerprintChange, detect_spawn_fingerprint_changes, format_input_change_str,
-    format_spawn_change,
+    SpawnFingerprintChange, detect_spawn_fingerprint_changes, format_checkout_path_str,
+    format_input_change_str, format_spawn_change,
 };
 use rusqlite::{Connection, OptionalExtension as _};
 use serde::{Deserialize, Serialize};
@@ -37,7 +38,10 @@ use wincode::{
     error::{ReadResult, WriteResult},
 };
 
-use self::remote::{ReadError, RemoteClients, RemoteUploads, Restore, UploadError};
+use self::{
+    checkout::RecordedCheckout,
+    remote::{ReadError, RemoteClients, RemoteUploads, Restore, UploadError},
+};
 use super::execute::{
     fingerprint::{PostRunFingerprint, TrackedEnvQuery},
     pipe::StdOutput,
@@ -113,6 +117,8 @@ pub struct CacheEntryValue {
     /// Filename of the output archive (e.g. `{uuid}.tar.zst`) stored alongside
     /// `cache.db` in the cache directory. `None` if no output files were produced.
     pub output_archive: Option<Str>,
+    /// Where the entry was recorded, and whether its outputs are tied to it.
+    pub checkout: RecordedCheckout,
 }
 
 #[derive(Debug)]
@@ -240,6 +246,11 @@ pub enum FingerprintMismatch {
         query: TrackedEnvQuery,
         mismatch: EnvMismatch,
     },
+    /// The entry's outputs embed the checkout path they were recorded at,
+    /// which is not this one.
+    CheckoutPath {
+        recorded_root: Str,
+    },
 }
 
 impl From<crate::session::execute::fingerprint::PostRunMismatch> for FingerprintMismatch {
@@ -276,7 +287,7 @@ pub fn split_path(path: &str) -> (Option<&str>, &str) {
 /// its own cache warm across branch switches, and a cache from a different
 /// version is simply ignored (it lives in a directory this build never looks
 /// at) rather than aborting the run. Bumping the version starts a fresh cache.
-const CACHE_SCHEMA_VERSION: u32 = 19;
+const CACHE_SCHEMA_VERSION: u32 = 20;
 
 /// Name of the per-version subdirectory (e.g. `v14`) under the task-cache
 /// directory that holds the database and output archives for the current

@@ -436,7 +436,7 @@ mod tests {
 
     use super::*;
     use crate::session::{
-        cache::InputChangeKind,
+        cache::{InputChangeKind, checkout::RecordedCheckout},
         execute::{
             fingerprint::{PostRunFingerprint, TrackedEnvQuery},
             pipe::{OutputKind, StdOutput},
@@ -488,6 +488,10 @@ mod tests {
             duration: Duration::from_millis(5),
             globbed_inputs: BTreeMap::new(),
             output_archive: Some(Str::from("uploader.tar.zst")),
+            checkout: RecordedCheckout {
+                root: Str::from("/work/app"),
+                outputs_contain_root: false,
+            },
         }
     }
 

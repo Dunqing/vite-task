@@ -23,8 +23,8 @@ use super::{CACHE_MISS_STYLE, COMMAND_STYLE, ColorizeExt};
 use crate::session::{
     cache::{
         CacheHitSource, CacheMiss, EnvMismatch, FingerprintMismatch, InputChangeKind,
-        SpawnFingerprintChange, detect_spawn_fingerprint_changes, format_input_change_str,
-        format_spawn_change,
+        SpawnFingerprintChange, detect_spawn_fingerprint_changes, format_checkout_path_str,
+        format_input_change_str, format_spawn_change,
     },
     event::{CacheDisabledReason, CacheNotUpdatedReason, CacheStatus, CacheUpdateStatus},
     execute::fingerprint::TrackedEnvQuery,
@@ -157,6 +157,9 @@ pub enum SavedCacheMissReason {
     /// A runner-aware tool reported a tracked bulk env query whose match-set changed
     /// between runs. Carries the first differing entry.
     TrackedEnvQueryChanged { query: TrackedEnvQuery, mismatch: EnvMismatch },
+    /// The entry's outputs embed the checkout path they were recorded at,
+    /// which is not this one.
+    CheckoutPath { recorded_root: Str },
     /// Reading the remote cache failed, and the local cache had no entry.
     RemoteReadFailed(SavedError),
 }
@@ -287,6 +290,9 @@ impl SavedCacheMissReason {
                         query: query.clone(),
                         mismatch: mismatch.clone(),
                     }
+                }
+                FingerprintMismatch::CheckoutPath { recorded_root } => {
+                    Self::CheckoutPath { recorded_root: recorded_root.clone() }
                 }
             },
             CacheMiss::RemoteReadFailed(error) => {
@@ -607,6 +613,12 @@ impl TaskResult {
                     SavedCacheMissReason::TrackedEnvChanged(mismatch)
                     | SavedCacheMissReason::TrackedEnvQueryChanged { mismatch, .. } => {
                         vt_str::format!("→ Cache miss: {mismatch}")
+                    }
+                    SavedCacheMissReason::CheckoutPath { recorded_root } => {
+                        vt_str::format!(
+                            "→ Cache miss: {}, so they can't be reused at this one",
+                            format_checkout_path_str(recorded_root)
+                        )
                     }
                     SavedCacheMissReason::RemoteReadFailed(error) => {
                         return (vt_str::format!("→ Cache miss: {}", error.message), &error.causes);
