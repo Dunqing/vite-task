@@ -29,7 +29,10 @@ use vt_plan::cache_metadata::EnvValueHash;
 use vt_str::Str;
 use wincode::{SchemaRead, SchemaWrite};
 
-use super::rebuildable::{Rebuildable, entry_path};
+use super::{
+    rebuildable::{Rebuildable, entry_path},
+    redact::pnpm_store_bin_dir,
+};
 use crate::{
     collections::HashMap,
     session::cache::{EnvMismatch, InputChangeKind},
@@ -465,6 +468,12 @@ pub fn fingerprint_path(
     path_read: PathRead,
 ) -> anyhow::Result<PathFingerprint> {
     let std_path = path.as_path();
+
+    // A store package's own `node_modules` that holds only `.bin` is pnpm's
+    // cold store showing through; see `redact::pnpm_store_bin_dir`.
+    if pnpm_store_bin_dir::matches(path) && pnpm_store_bin_dir::holds_only_bin(path) {
+        return Ok(PathFingerprint::NotFound);
+    }
 
     let file = match File::open(std_path) {
         Ok(file) => file,
@@ -979,5 +988,25 @@ mod tests {
         assert_eq!(validate(&fingerprint, &root), None);
         std::fs::write(root.join("out.tmp"), "").unwrap();
         assert_eq!(validate(&fingerprint, &root).as_deref(), Some("Added out.tmp"));
+    }
+
+    /// pnpm's cold store leaves a `.bin` in a store package's `node_modules`
+    /// that a warm store doesn't have; see `redact::pnpm_store_bin_dir`.
+    #[test]
+    fn store_package_node_modules_with_only_bin_is_missing() {
+        const DIR: &str = "node_modules/.pnpm/esbuild@0.28.2/node_modules/esbuild/node_modules";
+        let bin = vt_str::format!("{DIR}/.bin/");
+        let (_tmp, root) = workspace(&[bin.as_str()]);
+        let fingerprint = record(&root, &[(DIR, false)], &[], "");
+        assert_eq!(fingerprint.inferred_inputs[&rel(DIR)].state, PathFingerprint::NotFound);
+
+        std::fs::remove_dir_all(root.join(DIR)).unwrap();
+        assert_eq!(validate(&fingerprint, &root), None);
+
+        std::fs::create_dir_all(root.join(DIR).join("left-pad")).unwrap();
+        assert_eq!(
+            validate(&fingerprint, &root).as_deref(),
+            Some(vt_str::format!("Added {DIR}").as_str())
+        );
     }
 }

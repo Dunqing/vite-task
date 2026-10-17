@@ -445,4 +445,32 @@ mod tests {
         // BTreeMap naturally deduplicates by key
         assert_eq!(result.len(), 3);
     }
+
+    /// `.git` is never tracked automatically, but a task whose output embeds
+    /// git data can list `.git/HEAD` and `.git/refs/**` as explicit inputs.
+    #[test]
+    fn explicit_git_globs_are_hashed() {
+        let (_temp, workspace) = create_test_workspace();
+        fs::create_dir_all(workspace.join(".git/refs/heads")).unwrap();
+        fs::write(workspace.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(workspace.join(".git/refs/heads/main"), "0123abcd\n").unwrap();
+        fs::write(workspace.join(".git/index"), "binary").unwrap();
+        let positive: std::collections::BTreeSet<Str> =
+            [".git/HEAD".into(), ".git/refs/**".into()].into_iter().collect();
+
+        let result =
+            compute_globbed_inputs(&workspace, &positive, &std::collections::BTreeSet::new())
+                .unwrap();
+
+        assert_eq!(
+            result.keys().map(|path| path.as_str()).collect::<Vec<_>>(),
+            [".git/HEAD", ".git/refs/heads/main"]
+        );
+        let before = result[&RelativePathBuf::new(".git/refs/heads/main").unwrap()];
+        fs::write(workspace.join(".git/refs/heads/main"), "4567ef01\n").unwrap();
+        let result =
+            compute_globbed_inputs(&workspace, &positive, &std::collections::BTreeSet::new())
+                .unwrap();
+        assert_ne!(result[&RelativePathBuf::new(".git/refs/heads/main").unwrap()], before);
+    }
 }
