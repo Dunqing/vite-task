@@ -85,6 +85,19 @@ impl RelativePath {
         RelativePathBuf::new(cleaned)
     }
 
+    /// Returns the path without its final component, or [`None`] for the
+    /// empty path. The parent of a single component is the empty path.
+    #[must_use]
+    pub fn parent(&self) -> Option<&Self> {
+        if self.0.is_empty() {
+            return None;
+        }
+        let parent = self.0.rsplit_once('/').map_or("", |(parent, _)| parent);
+        // SAFETY: A leading part of a portable path that ends before a
+        // separator is still portable.
+        Some(unsafe { Self::assume_portable(parent) })
+    }
+
     /// Returns a path that, when joined onto `base`, yields `self`.
     ///
     /// If `base` is not a prefix of `self`, returns [`None`].
@@ -469,6 +482,15 @@ mod tests {
         let prefix = RelativePathBuf::new("foo").unwrap();
         let stripped_path = rel_path.strip_prefix(prefix).unwrap();
         assert_eq!(stripped_path.as_str(), "bar/baz");
+    }
+
+    #[test]
+    fn parent() {
+        let rel_path = RelativePathBuf::new("foo/bar/baz").unwrap();
+        let parents: Vec<&str> = std::iter::successors(rel_path.parent(), |path| path.parent())
+            .map(RelativePath::as_str)
+            .collect();
+        assert_eq!(parents, ["foo/bar", "foo", ""]);
     }
 
     #[test]
