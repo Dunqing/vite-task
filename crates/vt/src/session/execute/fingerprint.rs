@@ -1,10 +1,19 @@
 //! Post-run fingerprinting for execution caching.
 //!
-//! This module provides types and functions for creating and validating
-//! fingerprints of file system state after task execution.
+//! A run's inputs are fingerprinted after it, as the task left them: a file
+//! by its content, a folder by being one or, when the task listed it, by its
+//! entries. Two rules decide what else matches:
+//!
+//! 1. What a hit can rebuild may be missing (see [`super::rebuildable`]), and
+//!    so may an entry of a listed folder that a hit can rebuild.
+//! 2. A hit never deletes. Every folder the task created, and every folder
+//!    it wrote into that a hit can rebuild, is fingerprinted by its entries
+//!    whether or not the task read it, and must not hold anything the task
+//!    didn't leave there. What a hit can't rebuild in a folder the task
+//!    created, such as files renamed into it, must be as the task left it.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
     fs::File,
     io::{self, BufRead},
@@ -20,6 +29,7 @@ use vt_plan::cache_metadata::EnvValueHash;
 use vt_str::Str;
 use wincode::{SchemaRead, SchemaWrite};
 
+use super::rebuildable::{Rebuildable, entry_path};
 use crate::{
     collections::HashMap,
     session::cache::{EnvMismatch, InputChangeKind},
@@ -39,13 +49,21 @@ pub struct PathRead {
     pub read_dir_entries: bool,
 }
 
+/// Path write access info
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PathWrite {
+    /// A write found the path missing: the task created it.
+    pub created: bool,
+}
+
 /// Post-run fingerprint capturing file state after execution.
 /// Used to validate whether cached outputs are still valid.
 #[derive(SchemaWrite, SchemaRead, Debug, Default, Serialize)]
 pub struct PostRunFingerprint {
-    /// Paths inferred from fspy during execution with their content fingerprints.
-    /// Only populated when `input_config.includes_auto` is true.
-    pub inferred_inputs: HashMap<RelativePathBuf, PathFingerprint>,
+    /// Paths inferred from fspy during execution with their fingerprints:
+    /// the paths the task read when `input_config.includes_auto` is true,
+    /// and the output folders (see the module docs).
+    pub inferred_inputs: HashMap<RelativePathBuf, InputFingerprint>,
 
     /// Env vars observed via runner-aware IPC `getEnv` with `tracked: true`.
     /// Key is the env name; value is the env value hash at execution time, or
@@ -79,6 +97,36 @@ pub enum PostRunMismatch {
     TrackedEnvQuery { query: TrackedEnvQuery, mismatch: EnvMismatch },
 }
 
+/// An inferred input: a path as the task left it.
+#[derive(SchemaWrite, SchemaRead, PartialEq, Eq, Debug, Clone, Serialize, Deserialize)]
+pub struct InputFingerprint {
+    pub state: PathFingerprint,
+    /// A hit can rebuild the path, so it may also be missing.
+    pub rebuildable: bool,
+    /// The entries of a listed folder that a hit can rebuild, so they may
+    /// be missing.
+    pub rebuildable_entries: BTreeSet<Str>,
+}
+
+impl InputFingerprint {
+    /// The first difference between `current` and this fingerprint, as the
+    /// kind of change and the folder entry it names, or `None` if `current`
+    /// matches.
+    fn mismatch<'a>(
+        &'a self,
+        current: &'a PathFingerprint,
+    ) -> Option<(InputChangeKind, Option<&'a Str>)> {
+        match (&self.state, current) {
+            (_, PathFingerprint::NotFound) if self.rebuildable => None,
+            (PathFingerprint::Folder(Some(left)), PathFingerprint::Folder(Some(now))) => {
+                folder_mismatch(left, now, &self.rebuildable_entries)
+            }
+            (left, now) if left == now => None,
+            (left, now) => Some((determine_change_kind(left, now), None)),
+        }
+    }
+}
+
 /// Fingerprint for a single path (file or directory)
 #[derive(SchemaWrite, SchemaRead, PartialEq, Eq, Debug, Clone, Serialize, Deserialize)]
 pub enum PathFingerprint {
@@ -107,12 +155,12 @@ impl PostRunFingerprint {
     /// Negative glob filtering is done upstream (see
     /// [`super::tracked_accesses::TrackedPathAccesses::from_raw`]).
     /// Paths already present in `globbed_inputs` are skipped — they are
-    /// already tracked by the prerun glob fingerprint, and the read-write
-    /// overlap check in `execute_spawn` guarantees the task did not modify
-    /// them, so the prerun hash is still correct.
+    /// already tracked by the prerun glob fingerprint, so a task that
+    /// rewrites one misses on every run instead of hitting a stale entry.
     ///
     /// # Arguments
     /// * `inferred_path_reads` - Map of paths that were read during execution (from fspy)
+    /// * `rebuildable` - What a hit can rebuild, from the paths the task wrote
     /// * `base_dir` - Workspace root for resolving relative paths
     /// * `globbed_inputs` - Prerun glob fingerprint; paths here are skipped
     /// * `tracked_envs` - Tool-requested env vars (name -> value hash), validated on lookup
@@ -120,20 +168,36 @@ impl PostRunFingerprint {
     #[tracing::instrument(level = "debug", skip_all, name = "create_post_run_fingerprint")]
     pub fn create(
         inferred_path_reads: &HashMap<RelativePathBuf, PathRead>,
+        rebuildable: &Rebuildable,
         base_dir: &AbsolutePath,
         globbed_inputs: &BTreeMap<RelativePathBuf, u64>,
         tracked_envs: BTreeMap<Str, Option<EnvValueHash>>,
         tracked_env_queries: BTreeMap<TrackedEnvQuery, BTreeMap<Str, EnvValueHash>>,
     ) -> anyhow::Result<Self> {
-        let inferred_inputs = inferred_path_reads
+        let mut inferred_inputs = output_folder_inputs(rebuildable, base_dir, globbed_inputs)?;
+        let read_inputs = inferred_path_reads
             .par_iter()
-            .filter(|(path, _)| !globbed_inputs.contains_key(*path))
+            .filter(|(path, _)| {
+                !globbed_inputs.contains_key(*path) && !inferred_inputs.contains_key(*path)
+            })
             .map(|(relative_path, path_read)| {
                 let full_path = Arc::<AbsolutePath>::from(base_dir.join(relative_path));
-                let fingerprint = fingerprint_path(&full_path, *path_read)?;
+                let state = fingerprint_path(&full_path, *path_read)?;
+                let is_dir = matches!(state, PathFingerprint::Folder(_));
+                let rebuildable_entries = rebuildable
+                    .folder(relative_path)
+                    .filter(|_| path_read.read_dir_entries)
+                    .map(|folder| folder.rebuildable_entries.clone())
+                    .unwrap_or_default();
+                let fingerprint = InputFingerprint {
+                    state,
+                    rebuildable: rebuildable.contains(relative_path, is_dir),
+                    rebuildable_entries,
+                };
                 Ok((relative_path.clone(), fingerprint))
             })
-            .collect::<anyhow::Result<HashMap<_, _>>>()?;
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        inferred_inputs.extend(read_inputs);
 
         Ok(Self { inferred_inputs, tracked_envs, tracked_env_queries })
     }
@@ -154,32 +218,30 @@ impl PostRunFingerprint {
         unfiltered_envs: &FxHashMap<EnvName<Arc<OsStr>>, Arc<OsStr>>,
     ) -> anyhow::Result<Option<PostRunMismatch>> {
         let input_mismatch = self.inferred_inputs.par_iter().find_map_any(
-            |(input_relative_path, path_fingerprint)| {
+            |(input_relative_path, input_fingerprint)| {
                 let input_full_path = Arc::<AbsolutePath>::from(base_dir.join(input_relative_path));
                 let path_read = PathRead {
-                    read_dir_entries: matches!(path_fingerprint, PathFingerprint::Folder(Some(_))),
+                    read_dir_entries: matches!(
+                        input_fingerprint.state,
+                        PathFingerprint::Folder(Some(_))
+                    ),
                 };
                 let current_path_fingerprint = match fingerprint_path(&input_full_path, path_read) {
                     Ok(ok) => ok,
                     Err(err) => return Some(Err(err)),
                 };
-                if path_fingerprint == &current_path_fingerprint {
-                    None
-                } else {
-                    let (kind, entry_name) =
-                        determine_change_kind(path_fingerprint, &current_path_fingerprint);
-                    let path = if let Some(name) = entry_name {
-                        // For folder changes, build `dir/entry` path
-                        let entry = match RelativePathBuf::new(name.as_str()) {
-                            Ok(p) => p,
-                            Err(e) => return Some(Err(e.into())),
-                        };
-                        input_relative_path.as_relative_path().join(entry)
-                    } else {
-                        input_relative_path.clone()
+                let (kind, entry_name) = input_fingerprint.mismatch(&current_path_fingerprint)?;
+                let path = if let Some(name) = entry_name {
+                    // For folder changes, build `dir/entry` path
+                    let entry = match RelativePathBuf::new(name.as_str()) {
+                        Ok(p) => p,
+                        Err(e) => return Some(Err(e.into())),
                     };
-                    Some(Ok(PostRunMismatch::Input { kind, path }))
-                }
+                    input_relative_path.as_relative_path().join(entry)
+                } else {
+                    input_relative_path.clone()
+                };
+                Some(Ok(PostRunMismatch::Input { kind, path }))
             },
         );
         if let Some(result) = input_mismatch {
@@ -223,6 +285,62 @@ impl PostRunFingerprint {
 
         Ok(None)
     }
+}
+
+/// Rule 2's inputs: every output folder by its entries, and what a hit can't
+/// rebuild in a folder the task created as the task left it. Symlinks are
+/// fingerprinted by what they point to but not descended into.
+fn output_folder_inputs(
+    rebuildable: &Rebuildable,
+    base_dir: &AbsolutePath,
+    globbed_inputs: &BTreeMap<RelativePathBuf, u64>,
+) -> anyhow::Result<HashMap<RelativePathBuf, InputFingerprint>> {
+    let mut inputs = HashMap::default();
+    let mut unrebuildable: Vec<(RelativePathBuf, DirEntryKind)> = Vec::new();
+    for (path, folder) in rebuildable.output_folders() {
+        inputs.insert(
+            path.clone(),
+            InputFingerprint {
+                state: PathFingerprint::Folder(Some(folder.entries.clone())),
+                rebuildable: folder.is_rebuildable(),
+                rebuildable_entries: folder.rebuildable_entries.clone(),
+            },
+        );
+        unrebuildable.extend(unrebuildable_entries(
+            path,
+            &folder.entries,
+            &folder.rebuildable_entries,
+        ));
+    }
+    while let Some((path, kind)) = unrebuildable.pop() {
+        if inputs.contains_key(&path) || globbed_inputs.contains_key(&path) {
+            continue;
+        }
+        let full_path = Arc::<AbsolutePath>::from(base_dir.join(&path));
+        let is_dir = kind == DirEntryKind::Dir;
+        let state = fingerprint_path(&full_path, PathRead { read_dir_entries: is_dir })?;
+        let rebuildable_entries = rebuildable
+            .folder(&path)
+            .map(|folder| folder.rebuildable_entries.clone())
+            .unwrap_or_default();
+        if let PathFingerprint::Folder(Some(entries)) = &state {
+            unrebuildable.extend(unrebuildable_entries(&path, entries, &rebuildable_entries));
+        }
+        inputs.insert(path, InputFingerprint { state, rebuildable: false, rebuildable_entries });
+    }
+    Ok(inputs)
+}
+
+/// The entries of the folder at `path` that a hit can't rebuild.
+fn unrebuildable_entries<'a>(
+    path: &'a RelativePathBuf,
+    entries: &'a BTreeMap<Str, DirEntryKind>,
+    rebuildable_entries: &'a BTreeSet<Str>,
+) -> impl Iterator<Item = (RelativePathBuf, DirEntryKind)> + 'a {
+    entries
+        .iter()
+        .filter(|(name, _)| !rebuildable_entries.contains(*name))
+        .filter_map(|(name, kind)| Some((entry_path(path, name)?, kind.clone())))
 }
 
 /// Build the current match-set for `query` by enumerating the given env
@@ -303,68 +421,42 @@ fn first_env_glob_mismatch(
     }
 }
 
-/// Determine the kind of change between two differing path fingerprints.
-/// Caller guarantees `stored != current`.
-///
-/// Returns `(kind, entry_name)` where `entry_name` is `Some` for folder changes
-/// when a specific added/removed entry can be identified.
-fn determine_change_kind<'a>(
-    stored: &'a PathFingerprint,
-    current: &'a PathFingerprint,
-) -> (InputChangeKind, Option<&'a Str>) {
+/// Determine the kind of change between two differing path fingerprints
+/// that aren't both folder listings. Caller guarantees `stored != current`.
+const fn determine_change_kind(
+    stored: &PathFingerprint,
+    current: &PathFingerprint,
+) -> InputChangeKind {
     match (stored, current) {
-        (PathFingerprint::NotFound, _) => (InputChangeKind::Added, None),
-        (_, PathFingerprint::NotFound) => (InputChangeKind::Removed, None),
+        (PathFingerprint::NotFound, _) => InputChangeKind::Added,
+        (_, PathFingerprint::NotFound) => InputChangeKind::Removed,
         (PathFingerprint::FileContentHash(_), PathFingerprint::FileContentHash(_)) => {
-            (InputChangeKind::ContentModified, None)
-        }
-        (PathFingerprint::Folder(old), PathFingerprint::Folder(new)) => {
-            determine_folder_change_kind(old.as_ref(), new.as_ref())
+            InputChangeKind::ContentModified
         }
         // Type changed (file ↔ folder)
-        _ => (InputChangeKind::Added, None),
+        _ => InputChangeKind::Added,
     }
 }
 
-/// Determine whether a folder change is an addition or removal by comparing entries.
-/// Both maps are `BTreeMap` so we iterate them in sorted lockstep.
-/// Returns the specific entry name that was added or removed, if identifiable.
-fn determine_folder_change_kind<'a>(
-    old: Option<&'a BTreeMap<Str, DirEntryKind>>,
-    new: Option<&'a BTreeMap<Str, DirEntryKind>>,
-) -> (InputChangeKind, Option<&'a Str>) {
-    let (Some(old_entries), Some(new_entries)) = (old, new) else {
-        return (InputChangeKind::Added, None);
-    };
-
-    let mut old_iter = old_entries.iter();
-    let mut new_iter = new_entries.iter();
-    let mut o = old_iter.next();
-    let mut n = new_iter.next();
-
-    loop {
-        match (o, n) {
-            (None, None) => return (InputChangeKind::Added, None),
-            (Some((name, _)), None) => return (InputChangeKind::Removed, Some(name)),
-            (None, Some((name, _))) => return (InputChangeKind::Added, Some(name)),
-            (Some((ok, ov)), Some((nk, nv))) => match ok.cmp(nk) {
-                std::cmp::Ordering::Equal => {
-                    if ov != nv {
-                        return (InputChangeKind::Added, Some(ok));
-                    }
-                    o = old_iter.next();
-                    n = new_iter.next();
-                }
-                std::cmp::Ordering::Less => return (InputChangeKind::Removed, Some(ok)),
-                std::cmp::Ordering::Greater => return (InputChangeKind::Added, Some(nk)),
-            },
-        }
+/// The first difference between a folder's entries as the task `left` them
+/// and as they are `now`: an entry the task didn't leave there, which a hit
+/// wouldn't delete, or else a missing entry that a hit can't rebuild.
+fn folder_mismatch<'a>(
+    left: &'a BTreeMap<Str, DirEntryKind>,
+    now: &'a BTreeMap<Str, DirEntryKind>,
+    rebuildable_entries: &BTreeSet<Str>,
+) -> Option<(InputChangeKind, Option<&'a Str>)> {
+    if let Some((name, _)) = now.iter().find(|(name, kind)| left.get(*name) != Some(*kind)) {
+        return Some((InputChangeKind::Added, Some(name)));
     }
+    left.keys()
+        .find(|name| !now.contains_key(*name) && !rebuildable_entries.contains(*name))
+        .map(|name| (InputChangeKind::Removed, Some(name)))
 }
 
 /// Check if a directory entry should be ignored in fingerprinting
 const fn should_ignore_entry(name: &[u8]) -> bool {
-    matches!(name, b"." | b".." | b".DS_Store") || name.eq_ignore_ascii_case(b"dist")
+    matches!(name, b"." | b".." | b".DS_Store")
 }
 
 /// Fingerprint a single path
@@ -650,5 +742,242 @@ mod tests {
             fingerprint.validate(&workspace_root, &unfiltered_envs).expect("validation succeeds");
 
         assert_eq!(mismatch.is_none(), cfg!(windows));
+    }
+
+    // ── Path rules ──────────────────────────────────────────────────────────
+
+    fn rel(path: &str) -> RelativePathBuf {
+        RelativePathBuf::new(path).unwrap()
+    }
+
+    /// A workspace in a temporary directory holding `files`; a name ending in
+    /// `/` is an empty folder.
+    fn workspace(files: &[&str]) -> (tempfile::TempDir, vt_path::AbsolutePathBuf) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = vt_path::AbsolutePathBuf::new(tmp.path().to_path_buf()).unwrap();
+        for name in files {
+            let path = root.join(name.trim_end_matches('/'));
+            if name.ends_with('/') {
+                std::fs::create_dir_all(&path).unwrap();
+            } else {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, *name).unwrap();
+            }
+        }
+        (tmp, root)
+    }
+
+    /// The fingerprint of a run that read `reads` (`(path, listed)`) and wrote
+    /// `writes` (`(path, created)`), with every write archived except those
+    /// under `excluded`.
+    fn record(
+        root: &AbsolutePath,
+        reads: &[(&str, bool)],
+        writes: &[(&str, bool)],
+        excluded: &str,
+    ) -> PostRunFingerprint {
+        let reads: HashMap<RelativePathBuf, PathRead> = reads
+            .iter()
+            .map(|(path, listed)| (rel(path), PathRead { read_dir_entries: *listed }))
+            .collect();
+        let writes: HashMap<RelativePathBuf, PathWrite> = writes
+            .iter()
+            .map(|(path, created)| (rel(path), PathWrite { created: *created }))
+            .collect();
+        let is_excluded = |path: &RelativePathBuf| {
+            !excluded.is_empty() && path.strip_prefix(rel(excluded)).is_some()
+        };
+        let archived = writes.keys().filter(|path| !is_excluded(path)).cloned().collect();
+        let rebuildable = Rebuildable::new(root, &writes, &archived, is_excluded).unwrap();
+        PostRunFingerprint::create(
+            &reads,
+            &rebuildable,
+            root,
+            &BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .unwrap()
+    }
+
+    /// The first mismatch against the workspace as it is now, as
+    /// `"{kind:?} {path}"`.
+    fn validate(fingerprint: &PostRunFingerprint, root: &AbsolutePath) -> Option<Str> {
+        fingerprint.validate(root, &FxHashMap::default()).unwrap().map(|mismatch| match mismatch {
+            PostRunMismatch::Input { kind, path } => vt_str::format!("{kind:?} {path}"),
+            other => panic!("unexpected mismatch {other:?}"),
+        })
+    }
+
+    #[test]
+    fn created_file_may_be_missing_but_not_changed() {
+        let (_tmp, root) = workspace(&["package.json", "dist/main.js"]);
+        let fingerprint = record(
+            &root,
+            &[("dist/main.js", false)],
+            &[("dist", true), ("dist/main.js", true)],
+            "",
+        );
+        assert_eq!(validate(&fingerprint, &root), None);
+
+        std::fs::write(root.join("dist/main.js"), "stale").unwrap();
+        assert_eq!(validate(&fingerprint, &root).as_deref(), Some("ContentModified dist/main.js"));
+
+        std::fs::remove_dir_all(root.join("dist")).unwrap();
+        assert_eq!(validate(&fingerprint, &root), None);
+    }
+
+    #[test]
+    fn modified_file_must_be_as_left() {
+        // tsdown reads `package.json` and writes `exports` into it.
+        let (_tmp, root) = workspace(&["package.json"]);
+        let fingerprint = record(&root, &[("package.json", false)], &[("package.json", false)], "");
+        assert_eq!(validate(&fingerprint, &root), None);
+
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        assert_eq!(validate(&fingerprint, &root).as_deref(), Some("ContentModified package.json"));
+
+        std::fs::remove_file(root.join("package.json")).unwrap();
+        assert_eq!(validate(&fingerprint, &root).as_deref(), Some("Removed package.json"));
+    }
+
+    #[test]
+    fn created_folder_may_lack_entries_but_not_gain_them() {
+        // Vite checks `dist` before creating it; rolldown creates
+        // `dist/assets` and writes into it without looking at it.
+        let (_tmp, root) = workspace(&["package.json", "dist/index.html", "dist/assets/main.js"]);
+        let fingerprint = record(
+            &root,
+            &[("dist", false)],
+            &[
+                ("dist", true),
+                ("dist/index.html", true),
+                ("dist/assets", true),
+                ("dist/assets/main.js", true),
+            ],
+            "",
+        );
+        assert!(fingerprint.inferred_inputs.contains_key(&rel("dist/assets")));
+        assert_eq!(validate(&fingerprint, &root), None);
+
+        std::fs::remove_file(root.join("dist/assets/main.js")).unwrap();
+        assert_eq!(validate(&fingerprint, &root), None);
+        std::fs::write(root.join("dist/assets/stale.js"), "").unwrap();
+        assert_eq!(validate(&fingerprint, &root).as_deref(), Some("Added dist/assets/stale.js"));
+        std::fs::remove_file(root.join("dist/assets/stale.js")).unwrap();
+
+        std::fs::remove_dir_all(root.join("dist")).unwrap();
+        assert_eq!(validate(&fingerprint, &root), None);
+    }
+
+    #[test]
+    fn folder_renamed_into_place_must_be_as_left() {
+        // The task writes `dist.tmp/a.js` and renames `dist.tmp` to `dist`:
+        // a hit can't rebuild `a.js`.
+        let (_tmp, root) = workspace(&["package.json", "dist/a.js"]);
+        let fingerprint =
+            record(&root, &[], &[("dist.tmp", true), ("dist.tmp/a.js", true), ("dist", true)], "");
+        assert_eq!(validate(&fingerprint, &root), None);
+
+        std::fs::write(root.join("dist/a.js"), "stale").unwrap();
+        assert_eq!(validate(&fingerprint, &root).as_deref(), Some("ContentModified dist/a.js"));
+
+        std::fs::remove_file(root.join("dist/a.js")).unwrap();
+        assert_eq!(validate(&fingerprint, &root).as_deref(), Some("Removed dist/a.js"));
+    }
+
+    #[test]
+    fn folder_holding_only_created_files_may_be_missing() {
+        // tsdown lists an existing `dist`, empties it and fills it again.
+        let (_tmp, root) = workspace(&["package.json", "dist/index.mjs"]);
+        let fingerprint = record(&root, &[("dist", true)], &[("dist/index.mjs", true)], "");
+        assert_eq!(validate(&fingerprint, &root), None);
+
+        std::fs::write(root.join("dist/stale.mjs"), "").unwrap();
+        assert_eq!(validate(&fingerprint, &root).as_deref(), Some("Added dist/stale.mjs"));
+
+        std::fs::remove_dir_all(root.join("dist")).unwrap();
+        assert_eq!(validate(&fingerprint, &root), None);
+    }
+
+    #[test]
+    fn folder_holding_more_than_outputs_must_exist() {
+        // Codegen lists `src` and creates `src/gen.ts` next to the sources.
+        let (_tmp, root) = workspace(&["package.json", "src/a.ts", "src/gen.ts"]);
+        let fingerprint = record(&root, &[("src", true)], &[("src/gen.ts", true)], "");
+
+        std::fs::remove_file(root.join("src/gen.ts")).unwrap();
+        assert_eq!(validate(&fingerprint, &root), None);
+        std::fs::write(root.join("src/b.ts"), "").unwrap();
+        assert_eq!(validate(&fingerprint, &root).as_deref(), Some("Added src/b.ts"));
+
+        std::fs::remove_dir_all(root.join("src")).unwrap();
+        assert_eq!(validate(&fingerprint, &root).as_deref(), Some("Removed src"));
+    }
+
+    #[test]
+    fn listed_folder_may_lack_only_entries_the_task_created() {
+        // `eslint --cache .` lists the project and creates `.eslintcache`.
+        let (_tmp, root) = workspace(&["package.json", "src/a.js", ".eslintcache"]);
+        let fingerprint = record(&root, &[("", true)], &[(".eslintcache", true)], "");
+
+        std::fs::remove_file(root.join(".eslintcache")).unwrap();
+        assert_eq!(validate(&fingerprint, &root), None);
+        std::fs::remove_dir_all(root.join("src")).unwrap();
+        assert_eq!(validate(&fingerprint, &root).as_deref(), Some("Removed src"));
+    }
+
+    #[test]
+    fn excluded_outputs_are_not_checked() {
+        // Vite renames its dependency cache into place and excludes it from
+        // outputs.
+        let (_tmp, root) = workspace(&["package.json", "node_modules/.vite/deps/react.js"]);
+        let fingerprint = record(
+            &root,
+            &[],
+            &[
+                ("node_modules/.vite", true),
+                ("node_modules/.vite/deps_temp/react.js", true),
+                ("node_modules/.vite/deps", true),
+            ],
+            "node_modules/.vite/deps",
+        );
+        assert!(!fingerprint.inferred_inputs.contains_key(&rel("node_modules/.vite/deps")));
+
+        std::fs::write(root.join("node_modules/.vite/deps/stale.js"), "").unwrap();
+        assert_eq!(validate(&fingerprint, &root), None);
+        std::fs::remove_dir_all(root.join("node_modules/.vite")).unwrap();
+        assert_eq!(validate(&fingerprint, &root), None);
+    }
+
+    #[test]
+    fn checked_folder_is_a_directory() {
+        let (_tmp, root) = workspace(&["src/a.js"]);
+        let fingerprint = record(&root, &[("src", false)], &[], "");
+        assert_eq!(validate(&fingerprint, &root), None);
+        std::fs::write(root.join("src/b.js"), "").unwrap();
+        assert_eq!(validate(&fingerprint, &root), None);
+        std::fs::remove_dir_all(root.join("src")).unwrap();
+        assert_eq!(validate(&fingerprint, &root).as_deref(), Some("Removed src"));
+    }
+
+    #[test]
+    fn listings_include_dist_and_leave_out_ds_store() {
+        let (_tmp, root) = workspace(&["dist/a.js", ".DS_Store", "src/"]);
+        let fingerprint = record(&root, &[("", true)], &[], "");
+        let PathFingerprint::Folder(Some(entries)) = &fingerprint.inferred_inputs[&rel("")].state
+        else {
+            panic!("{:?}", fingerprint.inferred_inputs[&rel("")]);
+        };
+        assert_eq!(entries.keys().map(Str::as_str).collect::<Vec<_>>(), ["dist", "src"]);
+    }
+
+    #[test]
+    fn created_path_removed_again_must_stay_missing() {
+        let (_tmp, root) = workspace(&["package.json"]);
+        let fingerprint = record(&root, &[("out.tmp", false)], &[("out.tmp", true)], "");
+        assert_eq!(validate(&fingerprint, &root), None);
+        std::fs::write(root.join("out.tmp"), "").unwrap();
+        assert_eq!(validate(&fingerprint, &root).as_deref(), Some("Added out.tmp"));
     }
 }

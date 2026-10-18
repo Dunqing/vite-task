@@ -1,0 +1,97 @@
+[[e2e]]
+name = "read_write_task_is_cached_until_the_file_changes"
+comment = """
+A task that reads and writes the same file is cached. The file's content after the run is its fingerprint: a second run hits, because the file is as the task left it. Editing the file back to its original content is a miss, and the task rewrites it.
+"""
+cwd = "packages/rw-pkg"
+steps = [
+  { argv = [
+    "vt",
+    "run",
+    "task",
+  ], comment = "cache miss: replaces the first `i` with `!`" },
+  { argv = [
+    "vtt",
+    "print-file",
+    "src/data.txt",
+  ], comment = "the task's rewrite" },
+  { argv = [
+    "vt",
+    "run",
+    "task",
+  ], comment = "cache hit: the file is as the task left it" },
+  { argv = [
+    "vtt",
+    "print-file",
+    "src/data.txt",
+  ], comment = "a hit does not rewrite it again" },
+  { argv = [
+    "vtt",
+    "write-file",
+    "src/data.txt",
+    "original",
+  ], comment = "edit the file back" },
+  { argv = [
+    "vt",
+    "run",
+    "task",
+  ], comment = "cache miss: the file changed since the cached run" },
+  [
+    "vtt",
+    "print-file",
+    "src/data.txt",
+  ],
+]
+
+[[e2e]]
+name = "multi_task_with_read_write_hits_on_rerun"
+comment = """
+In a multi-task (`-r`) run, tasks that read and write a file are cached like any other, so a second run is all hits.
+"""
+steps = [["vt", "run", "-r", "task"], ["vt", "run", "-r", "task"]]
+
+[[e2e]]
+name = "read_write_outside_package_is_cached"
+comment = """
+The read and written file may be outside the task's package.
+"""
+cwd = "packages/rw-pkg"
+steps = [["vt", "run", "task-outside"], ["vt", "run", "task-outside"]]
+
+[[e2e]]
+name = "single_O_RDWR_open_is_cached"
+comment = """
+Opening a file with `O_RDWR` (e.g. `touch` keeping the file) reads and writes it in one call. The run is cached, and a second run hits.
+"""
+cwd = "packages/touch-pkg"
+steps = [["vt", "run", "task"], ["vt", "run", "task"]]
+
+[[e2e]]
+name = "excluded_read_write_file_is_not_fingerprinted"
+comment = """
+Excluding the file from `input` and `output` keeps it out of the fingerprint and the outputs: editing it between runs keeps the hit, and the hit leaves the edit alone.
+"""
+cwd = "packages/rw-pkg"
+steps = [
+  [
+    "vt",
+    "run",
+    "task-excluded",
+  ],
+  [
+    "vtt",
+    "write-file",
+    "src/data.txt",
+    "edited",
+  ],
+  { argv = [
+    "vt",
+    "run",
+    "task-excluded",
+  ], comment = "cache hit: the excluded file is not an input" },
+  [
+    "vtt",
+    "print-file",
+    "src/data.txt",
+  ],
+]

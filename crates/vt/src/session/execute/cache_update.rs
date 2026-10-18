@@ -12,8 +12,9 @@ use vt_str::Str;
 
 use super::{
     CacheState,
-    fingerprint::{PathRead, PostRunFingerprint, TrackedEnvQuery},
+    fingerprint::{PathRead, PathWrite, PostRunFingerprint, TrackedEnvQuery},
     glob,
+    rebuildable::Rebuildable,
     spawn::ChildOutcome,
 };
 use crate::{
@@ -28,13 +29,15 @@ use crate::{
 /// cfg-agnostic so the decision logic below doesn't need `cfg(fspy)` — the
 /// value is only ever `Some` when tracking happened (see [`observe_fspy`]).
 struct TrackingOutcome {
+    /// Auto-input reads after input exclusions are applied. Empty when
+    /// `input_config.includes_auto` is false.
     path_reads: HashMap<RelativePathBuf, PathRead>,
-    /// Auto-output writes after output exclusions are applied. Empty when
-    /// `output_config.includes_auto` is false.
-    path_writes: FxHashSet<RelativePathBuf>,
-    /// First path that was both read and written during execution, if any.
-    /// A non-empty value means caching this task is unsound.
-    read_write_overlap: Option<RelativePathBuf>,
+    /// Every write the task made, with whether it created the path, before
+    /// output exclusions are applied: what the task wrote decides what a hit
+    /// can rebuild.
+    path_writes: HashMap<RelativePathBuf, PathWrite>,
+    /// Tool-reported `ignoreOutput` paths, workspace-relative.
+    ignored_outputs: FxHashSet<RelativePathBuf>,
 }
 
 type TrackedEnvValues = BTreeMap<Str, Option<EnvValueHash>>;
@@ -106,23 +109,9 @@ pub(super) async fn update_cache(
         metadata,
         fspy,
         &ignored_input_rels,
-        &ignored_output_rels,
+        ignored_output_rels,
         workspace_root,
     );
-
-    if let Some(TrackingOutcome { read_write_overlap: Some(path), .. }) = &fspy_outcome {
-        // fspy-inferred read-write overlap: the task wrote to a file it also
-        // read, so the prerun input hashes are stale and caching is unsound.
-        // (We only check fspy-inferred reads, not globbed_inputs. A task that
-        // writes to a glob-matched file without reading it produces perpetual
-        // cache misses but not a correctness bug.)
-        return (
-            CacheUpdateStatus::NotUpdated(CacheNotUpdatedReason::InputModified {
-                path: path.clone(),
-            }),
-            None,
-        );
-    }
 
     if fspy_outcome.is_none() && fspy.is_some() {
         // Task requested fspy auto-inference but this binary was built without
@@ -144,13 +133,21 @@ pub(super) async fn update_cache(
         }
     };
 
-    // Paths already in globbed_inputs are skipped: the overlap check above
-    // guarantees no input modification, so the prerun hash is the correct
-    // post-exec hash.
+    let outputs = match Outputs::collect(metadata, fspy_outcome.as_ref(), fspy, workspace_root) {
+        Ok(outputs) => outputs,
+        Err(err) => {
+            return (
+                CacheUpdateStatus::NotUpdated(CacheNotUpdatedReason::CacheDisabled),
+                Some(err),
+            );
+        }
+    };
+
     let empty_path_reads = HashMap::default();
     let path_reads = fspy_outcome.as_ref().map_or(&empty_path_reads, |o| &o.path_reads);
     let post_run_fingerprint = match PostRunFingerprint::create(
         path_reads,
+        &outputs.rebuildable,
         workspace_root,
         &globbed_inputs,
         tracked_envs,
@@ -165,12 +162,7 @@ pub(super) async fn update_cache(
         }
     };
 
-    let output_archive = match collect_and_archive_outputs(
-        metadata,
-        fspy_outcome.as_ref(),
-        workspace_root,
-        cache_dir,
-    ) {
+    let output_archive = match outputs.archive(workspace_root, cache_dir) {
         Ok(archive) => archive,
         Err(err) => {
             return (
@@ -203,8 +195,7 @@ pub(super) async fn update_cache(
 ///
 /// `path_reads` is gated on `input_config.includes_auto`, filtered by
 /// user-configured input negatives, and by tool-reported `ignoreInput` paths.
-/// `path_writes` is filtered by user-configured output negatives and
-/// tool-reported `ignoreOutput` paths before read-write overlap detection.
+/// Output exclusions are applied by [`Outputs::collect`].
 #[cfg_attr(
     not(fspy),
     expect(clippy::missing_const_for_fn, reason = "the body is a no-op without fspy")
@@ -214,7 +205,7 @@ fn observe_fspy(
     metadata: &CacheMetadata,
     fspy: Option<&super::FspyTracking<'_>>,
     ignored_input_rels: &FxHashSet<RelativePathBuf>,
-    ignored_output_rels: &FxHashSet<RelativePathBuf>,
+    ignored_output_rels: FxHashSet<RelativePathBuf>,
     workspace_root: &AbsolutePath,
 ) -> Option<TrackingOutcome> {
     #[cfg(fspy)]
@@ -241,30 +232,10 @@ fn observe_fspy(
                 } else {
                     HashMap::default()
                 };
-            let filtered_path_writes: FxHashSet<RelativePathBuf> =
-                // fspy can also be attached for auto-input-only tasks. In that
-                // mode writes must not become auto outputs or overlap candidates.
-                if metadata.output_config.includes_auto
-                    && let Some(fspy) = fspy
-                {
-                    tracked
-                        .path_writes
-                        .iter()
-                        .filter(|path| {
-                            !fspy.output_negative_globs.is_match(path.as_str())
-                                && !is_ignored(path, ignored_output_rels)
-                        })
-                        .cloned()
-                        .collect()
-                } else {
-                    FxHashSet::default()
-                };
-            let read_write_overlap =
-                filtered_path_reads.keys().find(|p| filtered_path_writes.contains(*p)).cloned();
             TrackingOutcome {
                 path_reads: filtered_path_reads,
-                path_writes: filtered_path_writes,
-                read_write_overlap,
+                path_writes: tracked.path_writes,
+                ignored_outputs: ignored_output_rels,
             }
         })
     }
@@ -376,51 +347,85 @@ fn collect_tracked_env_queries(reports: &Reports) -> anyhow::Result<TrackedEnvQu
     Ok(tracked_env_queries)
 }
 
-/// Collect output files and create a tar.zst archive in the cache directory.
-///
-/// Output files are determined by:
-/// - fspy-tracked writes (already empty when `output_config.includes_auto` is false)
-/// - Positive output globs (always, if configured)
-/// - Negative output globs and tool-reported `ignoreOutput` paths filter
-///   fspy-tracked writes before this function receives them
-///
-/// Returns `Some(archive_filename)` if files were archived, `None` if no output files.
-fn collect_and_archive_outputs(
-    cache_metadata: &CacheMetadata,
-    tracking: Option<&TrackingOutcome>,
-    workspace_root: &AbsolutePath,
-    cache_dir: &AbsolutePath,
-) -> anyhow::Result<Option<Str>> {
-    let output_config = &cache_metadata.output_config;
+/// What a run leaves for the cache.
+struct Outputs {
+    /// The files to archive: fspy-tracked writes when
+    /// `output_config.includes_auto` is true, minus negative output globs and
+    /// tool-reported `ignoreOutput` paths, and the files matching the
+    /// positive output globs.
+    files: FxHashSet<RelativePathBuf>,
+    /// What a hit can rebuild.
+    rebuildable: Rebuildable,
+}
 
-    let mut output_files: FxHashSet<RelativePathBuf> = FxHashSet::default();
+impl Outputs {
+    fn collect(
+        cache_metadata: &CacheMetadata,
+        tracking: Option<&TrackingOutcome>,
+        fspy: Option<&super::FspyTracking<'_>>,
+        workspace_root: &AbsolutePath,
+    ) -> Result<Self, ExecutionError> {
+        let output_config = &cache_metadata.output_config;
+        let is_excluded = |path: &RelativePathBuf| {
+            fspy.is_some_and(|fspy| fspy.output_negative_globs.is_match(path.as_str()))
+                || tracking.is_some_and(|tracking| is_ignored(path, &tracking.ignored_outputs))
+        };
 
-    if let Some(t) = tracking {
-        output_files.extend(t.path_writes.iter().cloned());
+        let mut files: FxHashSet<RelativePathBuf> = FxHashSet::default();
+        // fspy can also be attached for auto-input-only tasks. In that mode
+        // writes must not become auto outputs.
+        if output_config.includes_auto
+            && let Some(tracking) = tracking
+        {
+            files.extend(tracking.path_writes.keys().filter(|path| !is_excluded(path)).cloned());
+        }
+        if !output_config.positive_globs.is_empty() {
+            let glob_paths = glob::collect_glob_paths(
+                workspace_root,
+                &output_config.positive_globs,
+                &output_config.negative_globs,
+            )
+            .map_err(|source| ExecutionError::Cache { kind: CacheErrorKind::Update, source })?;
+            files.extend(glob_paths);
+        }
+
+        let rebuildable = match tracking {
+            Some(tracking) => {
+                Rebuildable::new(workspace_root, &tracking.path_writes, &files, is_excluded)
+                    .map_err(ExecutionError::PostRunFingerprint)?
+            }
+            None => Rebuildable::default(),
+        };
+        Ok(Self { files, rebuildable })
     }
 
-    if !output_config.positive_globs.is_empty() {
-        let glob_paths = glob::collect_glob_paths(
-            workspace_root,
-            &output_config.positive_globs,
-            &output_config.negative_globs,
-        )?;
-        output_files.extend(glob_paths);
+    /// Create a tar.zst archive in the cache directory from the files and the
+    /// output folders, so a hit restores those even when empty.
+    ///
+    /// Returns `Some(archive_filename)` if anything was archived, `None` if
+    /// there are no outputs.
+    fn archive(
+        &self,
+        workspace_root: &AbsolutePath,
+        cache_dir: &AbsolutePath,
+    ) -> anyhow::Result<Option<Str>> {
+        let mut files: Vec<RelativePathBuf> = self.files.iter().cloned().collect();
+        files.sort();
+        let mut folders: Vec<RelativePathBuf> =
+            self.rebuildable.output_folders().map(|(path, _)| path.clone()).collect();
+        folders.sort();
+
+        if files.is_empty() && folders.is_empty() {
+            return Ok(None);
+        }
+
+        let archive_name: Str = vt_str::format!("{}.tar.zst", uuid::Uuid::new_v4());
+        let archive_path = cache_dir.join(archive_name.as_str());
+
+        archive::create_output_archive(workspace_root, &files, &folders, &archive_path)?;
+
+        Ok(Some(archive_name))
     }
-
-    if output_files.is_empty() {
-        return Ok(None);
-    }
-
-    let mut sorted_files: Vec<RelativePathBuf> = output_files.into_iter().collect();
-    sorted_files.sort();
-
-    let archive_name: Str = vt_str::format!("{}.tar.zst", uuid::Uuid::new_v4());
-    let archive_path = cache_dir.join(archive_name.as_str());
-
-    archive::create_output_archive(workspace_root, &sorted_files, &archive_path)?;
-
-    Ok(Some(archive_name))
 }
 
 #[cfg(test)]

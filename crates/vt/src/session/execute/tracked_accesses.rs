@@ -6,20 +6,20 @@
 #![cfg(fspy)]
 
 use fspy::{IpcPath, PathAccess, PathAccessIterable};
-use rustc_hash::FxHashSet;
 use vt_path::{AbsolutePath, RelativePathBuf};
 
-use super::fingerprint::PathRead;
+use super::fingerprint::{PathRead, PathWrite};
 use crate::collections::HashMap;
 
 /// Tracked file accesses from fspy, normalized to workspace-relative paths.
 #[derive(Default, Debug)]
 pub struct TrackedPathAccesses {
-    /// Tracked path reads
+    /// Tracked path reads, with whether the path's entries were listed.
     pub path_reads: HashMap<RelativePathBuf, PathRead>,
 
-    /// Tracked path writes
-    pub path_writes: FxHashSet<RelativePathBuf>,
+    /// Tracked path writes, with whether the task created the path: one of
+    /// its writes found the path missing.
+    pub path_writes: HashMap<RelativePathBuf, PathWrite>,
 }
 
 impl TrackedPathAccesses {
@@ -28,6 +28,13 @@ impl TrackedPathAccesses {
     /// files are skipped. User-configured negatives are applied by the caller
     /// (see module docs).
     pub fn from_raw(raw: &PathAccessIterable, workspace_root: &AbsolutePath) -> Self {
+        Self::from_accesses(raw.iter(), workspace_root)
+    }
+
+    fn from_accesses<'a>(
+        raw: impl Iterator<Item = PathAccess<'a>>,
+        workspace_root: &AbsolutePath,
+    ) -> Self {
         // Strip workspace root and clean `..` components in one pass.
         // fspy may report paths like `packages/sub-pkg/../shared/dist/output.js`.
         let relative_path = |path: &IpcPath| {
@@ -37,22 +44,22 @@ impl TrackedPathAccesses {
         };
 
         let mut accesses = Self::default();
-        for access in raw.iter() {
+        for access in raw {
             match access {
                 PathAccess::Read(path) => {
                     if let Some(path) = relative_path(path) {
                         accesses.add_read(path);
                     }
                 }
-                PathAccess::Write { path, .. } => {
+                PathAccess::Write { path, created } => {
                     if let Some(path) = relative_path(path) {
-                        accesses.path_writes.insert(path);
+                        accesses.add_write(path, created);
                     }
                 }
-                PathAccess::ReadWrite { path, .. } => {
+                PathAccess::ReadWrite { path, created } => {
                     if let Some(path) = relative_path(path) {
                         accesses.add_read(path.clone());
-                        accesses.path_writes.insert(path);
+                        accesses.add_write(path, created);
                     }
                 }
                 PathAccess::ReadDir(path) => {
@@ -67,6 +74,13 @@ impl TrackedPathAccesses {
 
     fn add_read(&mut self, path: RelativePathBuf) -> &mut PathRead {
         self.path_reads.entry(path).or_insert(PathRead { read_dir_entries: false })
+    }
+
+    /// A path is created when any of its writes found it missing: a task
+    /// that creates a file and then writes it again still created it, and
+    /// one that removes a file and writes it anew did too.
+    fn add_write(&mut self, path: RelativePathBuf, created: bool) {
+        self.path_writes.entry(path).or_default().created |= created;
     }
 }
 
@@ -113,6 +127,8 @@ fn is_pnpm_workspace_state(relative: &RelativePathBuf) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+
     use super::*;
 
     #[test]
@@ -139,5 +155,80 @@ mod tests {
         )]
         let relative_path = normalize_tracked_workspace_path(std::path::Path::new(r"foo\C:\bar"));
         assert!(relative_path.is_none());
+    }
+
+    /// Builds a record for a path.
+    type Record = fn(&IpcPath) -> PathAccess<'_>;
+
+    /// The records of one run, as `(path, access)` with the path relative to
+    /// the workspace root, turned into the accesses fspy would report.
+    fn track(records: &[(&str, Record)]) -> TrackedPathAccesses {
+        let workspace_root = vt_path::current_dir().unwrap();
+        let paths: Vec<OsString> = records
+            .iter()
+            .map(|(path, _)| workspace_root.join(path).as_path().as_os_str().to_owned())
+            .collect();
+        #[cfg(windows)]
+        let wide: Vec<Vec<u16>> = paths
+            .iter()
+            .map(|path| std::os::windows::ffi::OsStrExt::encode_wide(path.as_os_str()).collect())
+            .collect();
+        let accesses = records.iter().enumerate().map(|(index, (_, access))| {
+            #[cfg(unix)]
+            let path = <&IpcPath>::from(&paths[index]);
+            #[cfg(windows)]
+            let path = IpcPath::from_wide(&wide[index]);
+            access(path)
+        });
+        TrackedPathAccesses::from_accesses(accesses, &workspace_root)
+    }
+
+    fn read(path: &IpcPath) -> PathAccess<'_> {
+        PathAccess::Read(path)
+    }
+
+    fn listed(path: &IpcPath) -> PathAccess<'_> {
+        PathAccess::ReadDir(path)
+    }
+
+    fn created(path: &IpcPath) -> PathAccess<'_> {
+        PathAccess::Write { path, created: true }
+    }
+
+    fn written(path: &IpcPath) -> PathAccess<'_> {
+        PathAccess::Write { path, created: false }
+    }
+
+    fn read_written(path: &IpcPath) -> PathAccess<'_> {
+        PathAccess::ReadWrite { path, created: false }
+    }
+
+    fn rel(path: &str) -> RelativePathBuf {
+        RelativePathBuf::new(path).unwrap()
+    }
+
+    #[test]
+    fn a_path_is_created_when_any_write_found_it_missing() {
+        let tracked = track(&[
+            ("dist/a.js", created),
+            ("dist/a.js", written),
+            ("dist/b.js", written),
+            ("dist/b.js", created),
+            ("package.json", read_written),
+        ]);
+        assert_eq!(tracked.path_writes[&rel("dist/a.js")], PathWrite { created: true });
+        assert_eq!(tracked.path_writes[&rel("dist/b.js")], PathWrite { created: true });
+        assert_eq!(tracked.path_writes[&rel("package.json")], PathWrite { created: false });
+        assert!(tracked.path_reads.contains_key(&rel("package.json")));
+        assert!(!tracked.path_reads.contains_key(&rel("dist/a.js")));
+    }
+
+    #[test]
+    fn a_read_and_written_path_is_both_an_input_and_an_output() {
+        let tracked = track(&[("src/index.ts", read), ("src/index.ts", written), ("dist", listed)]);
+        assert!(tracked.path_reads.contains_key(&rel("src/index.ts")));
+        assert!(tracked.path_writes.contains_key(&rel("src/index.ts")));
+        assert!(tracked.path_reads[&rel("dist")].read_dir_entries);
+        assert!(!tracked.path_writes.contains_key(&rel("dist")));
     }
 }
