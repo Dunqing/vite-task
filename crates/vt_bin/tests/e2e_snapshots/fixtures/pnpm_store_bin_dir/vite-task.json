@@ -1,0 +1,8 @@
+{
+  "tasks": {
+    "check": {
+      "command": "vtt stat-file node_modules/.pnpm/esbuild@0.28.2/node_modules/esbuild/node_modules",
+      "cache": true
+    }
+  }
+}

@@ -1,0 +1,44 @@
+[[e2e]]
+name = "files_renamed_into_an_output_folder_must_be_as_left"
+comment = """
+The build writes `dist.tmp/a.js` and renames `dist.tmp` to `dist`. The task created `dist`, but it wrote `a.js` under another name, so a hit can't rebuild it: the entry hits only while `dist/a.js` is as the build left it, instead of restoring an empty `dist`.
+"""
+ignore = true
+steps = [
+  { argv = [
+    "vt",
+    "run",
+    "build",
+  ], comment = "cache miss, renames dist.tmp/ to dist/" },
+  { argv = [
+    "vt",
+    "run",
+    "build",
+  ], comment = "cache hit: dist/ is as the build left it" },
+  { argv = [
+    "vtt",
+    "write-file",
+    "dist/a.js",
+    "stale",
+  ], comment = "a file left by an older build" },
+  { argv = [
+    "vt",
+    "run",
+    "build",
+  ], comment = "cache miss: a hit can't rebuild dist/a.js, so it must be as the build left it" },
+  { argv = [
+    "vtt",
+    "rm",
+    "dist/a.js",
+  ], comment = "the file deleted" },
+  { argv = [
+    "vt",
+    "run",
+    "build",
+  ], comment = "cache miss: a hit couldn't restore it" },
+  { argv = [
+    "vtt",
+    "print-file",
+    "dist/a.js",
+  ], comment = "rebuilt by the real build" },
+]

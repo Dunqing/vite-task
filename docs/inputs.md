@@ -231,11 +231,16 @@ If you encounter a case where fspy fails to detect a file read, please [report t
 2. The file(s) that weren't detected
 3. Steps to reproduce
 
-### Tasks That Modify Files They Read
+### How Tracked Paths Are Compared
 
-A task is not cached when it writes to a file that it also read, because the file no longer matches what the task read. The run summary says the task was `not cached because it modified its inputs`, and `vp run --last-details` names the file and shows the settings that exclude it.
+Every path a task reads is an input, and every path it writes is an output. Inputs are compared with how the task left them, after the run, so a task that writes a file it read is cached: `tsdown` writes `exports` into `package.json`, the next run hits, and editing `package.json` runs the task again. Two rules decide what else matches:
 
-If the file is temporary or shouldn't affect caching, exclude it from both `input` and `output`. Keep `{ "auto": true }` in each list, since a list without it turns off automatic tracking:
+- **What a cache hit can rebuild may be missing.** A hit restores the outputs, so a file the task created doesn't have to be there, and neither does a folder the task created or wrote into that holds nothing but such files, such as `dist`. A clean checkout without `dist` hits and gets `dist` back, and so does a tree with one chunk deleted from it. In a folder the task listed, an entry the hit can rebuild may be missing too: `eslint --cache .` lists the project directory and creates `.eslintcache` in it, and a clean checkout without `.eslintcache` hits.
+- **A cache hit never deletes.** A folder the task created, or one a hit can rebuild, may not hold anything the task didn't leave there, whether or not the task read it: a stale chunk from an older build makes the entry miss, and the real build removes it. Anything in a folder the task created that a hit can't rebuild, such as files a tool renamed into it, must be as the task left it.
+
+A path the task created is one that was missing when the task wrote it, so a build that deletes `dist` and writes it again created it. A path excluded from `output` is not restored; if the task created it, it may be missing, and nothing in it is checked.
+
+If a file is temporary or shouldn't affect caching, exclude it from both `input` and `output`. Keep `{ "auto": true }` in each list, since a list without it turns off automatic tracking:
 
 ```json
 {
@@ -247,6 +252,28 @@ If the file is temporary or shouldn't affect caching, exclude it from both `inpu
 ```
 
 For a file outside the package directory, use the object form with `"base": "workspace"`.
+
+### Outputs That Contain the Checkout Path
+
+When outputs are archived, their contents are scanned for the workspace's absolute path. An entry whose outputs contain it is shared between machines only when they check out the workspace at the same path: Prettier's `--cache` file, for example, keys files by their absolute paths, and restoring it elsewhere would hand Prettier stale paths. Elsewhere the task runs again, with `cache miss: outputs embed the checkout path`. Outputs that hash the path into file names or content are not detected.
+
+### `.git` Is Not Tracked
+
+Reads under `.git` are never tracked automatically: many tools call `git` for telemetry and would miss the cache on every commit. A task whose output embeds git information, such as `typedoc` source links that carry the commit hash or VitePress's `lastUpdated` dates, should list `.git/HEAD` and `.git/refs/**` as explicit inputs, or disable caching:
+
+```json
+{
+  "cache": { "input": [{ "auto": true }, ".git/HEAD", ".git/refs/**"] }
+}
+```
+
+### Package Manager Files
+
+pnpm's `node_modules/.modules.yaml` and the shims in `node_modules/.bin` are fingerprinted only by whether they exist, since their content changes with every install, and `node_modules/.pnpm-workspace-state-*.json` is ignored. A package's own `node_modules` inside pnpm's store that holds nothing but `.bin`, which pnpm creates only while it runs the package's build script, counts as missing, so a cold and a warm store match.
+
+### Not Supported
+
+Automatic tracking cannot cache tasks that are not idempotent, tasks that rewrite their own inputs differently on every run, work done by daemons (`watchman`, `eslint_d`, `docker run`), or setup steps that change machine state (`playwright install`). Disable caching for them with `cache: false`.
 
 ### Cache Disabled
 

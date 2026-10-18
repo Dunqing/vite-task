@@ -1,0 +1,8 @@
+{
+  "tasks": {
+    "format": {
+      "command": "prettier --check --cache .",
+      "cache": true
+    }
+  }
+}

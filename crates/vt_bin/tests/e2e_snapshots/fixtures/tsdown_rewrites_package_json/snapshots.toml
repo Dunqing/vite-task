@@ -1,0 +1,59 @@
+[[e2e]]
+name = "rewritten_package_json_must_be_as_left"
+comment = """
+`tsdown` with `exports: true` reads `package.json` for the version it bundles and writes the `exports` field back into the same file. The file as the build left it is its fingerprint: a second run hits. A version bump is a miss, the real build bundles the new version, and the bump survives.
+"""
+ignore = true
+steps = [
+  { argv = [
+    "vt",
+    "run",
+    "build",
+  ], comment = "cache miss: writes exports into package.json" },
+  [
+    "vtt",
+    "grep-file",
+    "package.json",
+    "exports",
+  ],
+  [
+    "vtt",
+    "grep-file",
+    "dist/index.mjs",
+    "1.0.0",
+  ],
+  { argv = [
+    "vt",
+    "run",
+    "build",
+  ], comment = "cache hit: package.json is as the build left it" },
+  { argv = [
+    "vtt",
+    "replace-file-content",
+    "package.json",
+    "\"version\": \"1.0.0\"",
+    "\"version\": \"1.1.0\"",
+  ], comment = "bump the version" },
+  { argv = [
+    "vt",
+    "run",
+    "build",
+  ], comment = "cache miss: package.json changed since the cached run" },
+  [
+    "vtt",
+    "grep-file",
+    "dist/index.mjs",
+    "1.1.0",
+  ],
+  { argv = [
+    "vtt",
+    "grep-file",
+    "package.json",
+    "1.1.0",
+  ], comment = "the bump survives the build" },
+  { argv = [
+    "vt",
+    "run",
+    "build",
+  ], comment = "cache hit" },
+]

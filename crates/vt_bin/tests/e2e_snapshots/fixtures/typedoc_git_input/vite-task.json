@@ -1,0 +1,10 @@
+{
+  "tasks": {
+    "docs": {
+      "command": "typedoc",
+      "cache": {
+        "input": [{ "auto": true }, ".git/HEAD", ".git/refs/**"]
+      }
+    }
+  }
+}

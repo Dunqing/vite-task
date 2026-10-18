@@ -11,6 +11,7 @@ allowBuilds:
 minimumReleaseAgeExclude:
   - vite-plus
   - '@voidzero-dev/*'
+  - eslint@10.13.0
 
 catalog:
   '@anthropic-ai/sandbox-runtime': 0.0.78
@@ -27,6 +28,8 @@ catalog:
   cross-env: ^10.1.0
   cross-spawn: 7.0.6
   deno: 2.9.6
+  # The e2e fixtures for the cache rules pin the tools they exercise.
+  eslint: 10.13.0
   husky: ^9.1.7
   lint-staged: ^17.0.0
   oxfmt: 0.73.0
@@ -37,6 +40,9 @@ catalog:
   # The e2e tests run this pnpm; keep it in sync with `packageManager`.
   pnpm: 11.24.0
   postject: 1.0.0-alpha.6
+  prettier: 3.9.10
+  tsdown: 0.23.1
+  typedoc: 0.28.20
   typescript: ^6.0.3
   vite: npm:@voidzero-dev/vite-plus-core@1.1.0
   vite-plus: 1.1.0
@@ -51,6 +57,9 @@ overrides:
   # override above routes vite to the Vite+ toolchain fork, which does not carry
   # the integration — so scope vite-task-tools' `vite` to a real upstream build.
   vite-task-tools>vite: 8.3.2
+  # typedoc 0.28 needs TypeScript's JavaScript API, which the TypeScript 7
+  # preview that `tsc` comes from no longer ships.
+  typedoc>typescript: 5.9.3
 peerDependencyRules:
   allowAny:
     - vite

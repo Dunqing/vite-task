@@ -1,0 +1,49 @@
+[[e2e]]
+name = "listed_folder_may_lack_entries_the_task_created"
+comment = """
+`eslint --cache .` lists the project directory to find files and creates `.eslintcache` in it. A listing must be as the task left it, except that an entry the task created may be missing, since a hit restores it: the second run hits, a clean checkout without `.eslintcache` hits too (and gets the cache file restored), and a new source file is a miss.
+"""
+ignore = true
+steps = [
+  { argv = [
+    "vt",
+    "run",
+    "lint",
+  ], comment = "cache miss, writes .eslintcache" },
+  [
+    "vtt",
+    "stat-file",
+    ".eslintcache",
+  ],
+  { argv = [
+    "vt",
+    "run",
+    "lint",
+  ], comment = "cache hit: the listing is as the task left it" },
+  [
+    "vtt",
+    "rm",
+    ".eslintcache",
+  ],
+  { argv = [
+    "vt",
+    "run",
+    "lint",
+  ], comment = "cache hit on a clean checkout" },
+  { argv = [
+    "vtt",
+    "stat-file",
+    ".eslintcache",
+  ], comment = "restored from the cache" },
+  { argv = [
+    "vtt",
+    "write-file",
+    "src/b.js",
+    "export const b = 2;",
+  ], comment = "a new source file" },
+  { argv = [
+    "vt",
+    "run",
+    "lint",
+  ], comment = "cache miss: src/ has a new entry" },
+]

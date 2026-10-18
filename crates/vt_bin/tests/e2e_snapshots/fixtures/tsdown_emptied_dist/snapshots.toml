@@ -1,0 +1,41 @@
+[[e2e]]
+name = "emptied_dist_may_be_missing"
+comment = """
+A rebuild on a tree that has `dist` empties it and fills it again: that run did not create `dist`, but `dist` holds nothing except the build's outputs. Its cache entry accepts a tree without `dist` too and restores it, like an entry recorded on a clean checkout.
+"""
+ignore = true
+steps = [
+  { argv = [
+    "vt",
+    "run",
+    "build",
+  ], comment = "cache miss, creates dist/" },
+  { argv = [
+    "vtt",
+    "replace-file-content",
+    "src/index.ts",
+    "v1",
+    "v2",
+  ], comment = "a source change" },
+  { argv = [
+    "vt",
+    "run",
+    "build",
+  ], comment = "cache miss: tsdown empties dist/ and fills it again" },
+  { argv = [
+    "vtt",
+    "rm",
+    "-rf",
+    "dist",
+  ], comment = "a clean checkout of this commit has no dist/" },
+  { argv = [
+    "vt",
+    "run",
+    "build",
+  ], comment = "cache hit: dist/ held only the build's outputs, so it may be missing" },
+  { argv = [
+    "vtt",
+    "stat-file",
+    "dist/index.mjs",
+  ], comment = "restored from the cache" },
+]

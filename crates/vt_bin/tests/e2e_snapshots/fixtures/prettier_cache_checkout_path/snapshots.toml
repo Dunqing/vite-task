@@ -1,0 +1,41 @@
+[[e2e]]
+name = "outputs_with_the_checkout_path_are_not_shared_across_paths"
+comment = """
+`prettier --check --cache .` writes `node_modules/.cache/prettier/.prettier-cache`, keyed by absolute file paths. An entry whose outputs contain the checkout path is reused only at that path: copying `a`'s task cache into the identical workspace `b` (as a remote cache would share it) misses there, and `b` records its own entry.
+"""
+ignore = true
+steps = [
+  { cwd = "a", argv = [
+    "vt",
+    "run",
+    "format",
+  ], comment = "cache miss, writes the prettier cache" },
+  { cwd = "a", argv = [
+    "vtt",
+    "grep-file",
+    "node_modules/.cache/prettier/.prettier-cache",
+    "a.js",
+  ], comment = "the cache names the checked files by absolute path" },
+  { cwd = "a", argv = [
+    "vt",
+    "run",
+    "format",
+  ], comment = "cache hit at the same path" },
+  { argv = [
+    "vtt",
+    "cp",
+    "-r",
+    "a/node_modules/.vite/task-cache",
+    "b/node_modules/.vite/task-cache",
+  ], comment = "share the entry with another checkout" },
+  { cwd = "b", argv = [
+    "vt",
+    "run",
+    "format",
+  ], comment = "cache miss: the outputs embed a's path" },
+  { cwd = "b", argv = [
+    "vt",
+    "run",
+    "format",
+  ], comment = "cache hit: b's own entry" },
+]

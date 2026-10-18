@@ -1,0 +1,40 @@
+[[e2e]]
+name = "store_package_node_modules_with_only_bin_counts_as_missing"
+comment = """
+pnpm creates `<pkg>/node_modules/.bin` inside its store only while it runs that package's build script, so a cold store has the directory and a warm store does not. Module resolution checks the directory on its way up. One that holds nothing but `.bin` is fingerprinted as missing, so both installs match; one with another entry is a real input.
+"""
+steps = [
+  { argv = [
+    "vtt",
+    "mkdir",
+    "-p",
+    "node_modules/.pnpm/esbuild@0.28.2/node_modules/esbuild/node_modules/.bin",
+  ], comment = "a cold store" },
+  { argv = [
+    "vt",
+    "run",
+    "check",
+  ], comment = "cache miss" },
+  { argv = [
+    "vtt",
+    "rm",
+    "-rf",
+    "node_modules/.pnpm/esbuild@0.28.2/node_modules/esbuild/node_modules",
+  ], comment = "a warm store" },
+  { argv = [
+    "vt",
+    "run",
+    "check",
+  ], comment = "cache hit: the directory counted as missing" },
+  { argv = [
+    "vtt",
+    "mkdir",
+    "-p",
+    "node_modules/.pnpm/esbuild@0.28.2/node_modules/esbuild/node_modules/left-pad",
+  ], comment = "a dependency of its own" },
+  { argv = [
+    "vt",
+    "run",
+    "check",
+  ], comment = "cache miss: the directory is a real input" },
+]

@@ -1,0 +1,81 @@
+[[e2e]]
+name = "created_dist_may_be_missing_or_incomplete_but_not_stale"
+comment = """
+`vite build` creates `dist`, so the cache entry accepts a tree without `dist` (a clean checkout) and restores it on a hit. A `dist` that exists may be missing some of its entries, which the hit restores, but may not contain anything the build did not leave there: a stale chunk makes the entry miss, and the real build removes the chunk. A build on a tree that already has `dist` empties it and fills it again, so `dist` holds only what the build wrote, and that entry catches a stale file too.
+"""
+ignore = true
+steps = [
+  { argv = [
+    "vt",
+    "run",
+    "build",
+  ], comment = "cache miss, creates dist/" },
+  { argv = [
+    "vt",
+    "run",
+    "build",
+  ], comment = "cache hit: dist/ is as the build left it" },
+  { argv = [
+    "vtt",
+    "rm",
+    "-rf",
+    "dist",
+  ], comment = "a clean checkout has no dist/" },
+  { argv = [
+    "vt",
+    "run",
+    "build",
+  ], comment = "cache hit: a directory the build created may be missing" },
+  { argv = [
+    "vtt",
+    "stat-file",
+    "dist/assets/main.js",
+  ], comment = "restored from the cache" },
+  { argv = [
+    "vtt",
+    "rm",
+    "dist/assets/main.js",
+  ], comment = "one chunk deleted from dist/" },
+  { argv = [
+    "vt",
+    "run",
+    "build",
+  ], comment = "cache hit: a directory the build created may be missing some of its entries" },
+  { argv = [
+    "vtt",
+    "stat-file",
+    "dist/assets/main.js",
+  ], comment = "restored from the cache" },
+  { argv = [
+    "vtt",
+    "write-file",
+    "dist/assets/stale.js",
+    "stale",
+  ], comment = "a chunk left by an older build" },
+  { argv = [
+    "vt",
+    "run",
+    "build",
+  ], comment = "cache miss: dist/ is not as the build left it" },
+  { argv = [
+    "vtt",
+    "stat-file",
+    "dist/assets/stale.js",
+  ], comment = "the real build emptied dist/" },
+  { argv = [
+    "vtt",
+    "write-file",
+    "dist/stale.html",
+    "stale",
+  ], comment = "a page left by an older build" },
+  { argv = [
+    "vt",
+    "run",
+    "build",
+  ], comment = "cache miss: dist/ held only what the build wrote, so it may not hold anything else" },
+  { argv = [
+    "vtt",
+    "stat-file",
+    "dist/stale.html",
+  ], comment = "the real build emptied dist/ again" },
+]
