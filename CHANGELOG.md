@@ -1,5 +1,6 @@
 # Changelog
 
+- **Fixed** In cached tasks on Linux and macOS, programs that pass `-1` as a directory descriptor to calls such as `openat` no longer abort. For example, `ps -p <pid>` from procps-ng 4.0.6 or later aborted when the process had already exited ([#862](https://github.com/voidzero-dev/vite-task/pull/862)).
 - **Fixed** `vp run` no longer panics before running a script that contains non-ASCII characters, such as `echo こんにちは`, and no longer cuts off such commands where it displays them ([#861](https://github.com/voidzero-dev/vite-task/pull/861)).
 - **Fixed** On Linux, concurrent system calls in tracked programs, such as `pnpm dlx`, no longer cause a stack overflow ([#854](https://github.com/voidzero-dev/vite-task/pull/854)).
 - **Fixed** Cached tasks can now run scripts whose shebang names an interpreter path longer than 126 bytes. Before, the path was cut short and the script failed to start or ran the wrong program. On macOS, text after a `#` in the shebang line is now ignored, as it is when the script runs on its own ([#788](https://github.com/voidzero-dev/vite-task/pull/788)).
