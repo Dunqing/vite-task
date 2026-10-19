@@ -139,10 +139,16 @@ impl Rebuildable {
         self.folders.get(path)
     }
 
-    /// The folders a hit restores and must find nothing extra in: those the
-    /// task created, and those it wrote into that can be rebuilt.
+    /// The folders a hit restores, even when empty: those the task created,
+    /// and those it wrote into that can be rebuilt.
     pub fn output_folders(&self) -> impl Iterator<Item = (&RelativePathBuf, &WrittenFolder)> {
         self.folders.iter().filter(|(_, folder)| folder.created || folder.is_rebuildable())
+    }
+
+    /// The folders the task created. What a hit can't rebuild in them must
+    /// already be there.
+    pub fn created_folders(&self) -> impl Iterator<Item = (&RelativePathBuf, &WrittenFolder)> {
+        self.folders.iter().filter(|(_, folder)| folder.created)
     }
 }
 
@@ -197,6 +203,13 @@ mod tests {
         folders
     }
 
+    fn created_folders(rebuildable: &Rebuildable) -> Vec<&str> {
+        let mut folders: Vec<&str> =
+            rebuildable.created_folders().map(|(path, _)| path.as_str()).collect();
+        folders.sort_unstable();
+        folders
+    }
+
     #[test]
     fn created_folder_holding_only_created_files_can_be_rebuilt() {
         let r = rebuildable(
@@ -212,7 +225,7 @@ mod tests {
         assert!(r.contains(&rel("pkg/dist"), true));
         assert!(r.contains(&rel("pkg/dist/index.html"), false));
         assert!(!r.contains(&rel("pkg"), true));
-        assert_eq!(output_folders(&r), ["pkg/dist", "pkg/dist/assets"]);
+        assert_eq!(created_folders(&r), ["pkg/dist", "pkg/dist/assets"]);
         assert_eq!(r.folder(&rel("pkg")).unwrap().rebuildable_entries, [Str::from("dist")].into());
     }
 
@@ -222,6 +235,7 @@ mod tests {
         let r = rebuildable(&["package.json", "dist/index.mjs"], &[("dist/index.mjs", true)], "");
         assert!(r.contains(&rel("dist"), true));
         assert_eq!(output_folders(&r), ["dist"]);
+        assert!(created_folders(&r).is_empty());
     }
 
     #[test]
@@ -230,7 +244,7 @@ mod tests {
         let r = rebuildable(&["package.json", "dist/index.js"], &[("dist/index.js", false)], "");
         assert!(!r.contains(&rel("dist"), true));
         assert!(!r.contains(&rel("dist/index.js"), false));
-        assert!(output_folders(&r).is_empty());
+        assert!(created_folders(&r).is_empty());
     }
 
     #[test]
@@ -243,8 +257,8 @@ mod tests {
         );
         assert!(!r.contains(&rel("dist"), true));
         assert!(r.folder(&rel("dist")).unwrap().rebuildable_entries.is_empty());
-        // Still an output folder: a hit can't empty it.
-        assert_eq!(output_folders(&r), ["dist"]);
+        // Created, so what a hit can't rebuild in it must be there.
+        assert_eq!(created_folders(&r), ["dist"]);
     }
 
     #[test]
@@ -262,7 +276,7 @@ mod tests {
         assert!(r.contains(&rel("node_modules/.vite"), true));
         assert!(r.contains(&rel("node_modules/.vite/deps"), true));
         assert!(!r.contains(&rel("node_modules"), true));
-        assert_eq!(output_folders(&r), ["node_modules/.vite"]);
+        assert_eq!(created_folders(&r), ["node_modules/.vite"]);
     }
 
     #[test]

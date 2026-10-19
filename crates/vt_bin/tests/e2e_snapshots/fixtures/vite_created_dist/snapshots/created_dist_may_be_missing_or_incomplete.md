@@ -1,6 +1,6 @@
-# created_dist_may_be_missing_or_incomplete_but_not_stale
+# created_dist_may_be_missing_or_incomplete
 
-`vite build` creates `dist`, so the cache entry accepts a tree without `dist` (a clean checkout) and restores it on a hit. A `dist` that exists may be missing some of its entries, which the hit restores, but may not contain anything the build did not leave there: a stale chunk makes the entry miss, and the real build removes the chunk. A build on a tree that already has `dist` empties it and fills it again, so `dist` holds only what the build wrote, and that entry catches a stale file too.
+`vite build` creates `dist`, so the cache entry accepts a tree without `dist` (a clean checkout) and restores it on a hit, and a `dist` missing some of its entries, which the hit restores. A hit doesn't delete: a chunk an older build left in `dist` stays after a hit, until `dist` is deleted.
 
 ## `vt run build`
 
@@ -82,39 +82,45 @@ a chunk left by an older build
 
 ## `vt run build`
 
-cache miss: dist/ is not as the build left it
+cache hit: a hit doesn't delete files
 
 ```
-$ vite build ○ cache miss: 'stale.js' added in 'dist/assets', executing
+$ vite build ◉ cache hit, replaying
+
+---
+vt run: cache hit.
 ```
 
 ## `vtt stat-file dist/assets/stale.js`
 
-the real build emptied dist/
+still there
 
 ```
-dist/assets/stale.js: missing
+dist/assets/stale.js: exists
 ```
 
-## `vtt write-file dist/stale.html stale`
+## `vtt rm -rf dist`
 
-a page left by an older build
+delete dist/ to get a clean one
 
 ```
 ```
 
 ## `vt run build`
 
-cache miss: dist/ held only what the build wrote, so it may not hold anything else
+cache hit: restores dist/
 
 ```
-$ vite build ○ cache miss: 'stale.html' added in 'dist', executing
+$ vite build ◉ cache hit, replaying
+
+---
+vt run: cache hit.
 ```
 
-## `vtt stat-file dist/stale.html`
+## `vtt stat-file dist/assets/stale.js`
 
-the real build emptied dist/ again
+gone: the hit restored only what the build wrote
 
 ```
-dist/stale.html: missing
+dist/assets/stale.js: missing
 ```

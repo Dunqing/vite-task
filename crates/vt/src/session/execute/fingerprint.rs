@@ -2,15 +2,12 @@
 //!
 //! A run's inputs are fingerprinted after it, as the task left them: a file
 //! by its content, a folder by being one or, when the task listed it, by its
-//! entries. Two rules decide what else matches:
-//!
-//! 1. What a hit can rebuild may be missing (see [`super::rebuildable`]), and
-//!    so may an entry of a listed folder that a hit can rebuild.
-//! 2. A hit never deletes. Every folder the task created, and every folder
-//!    it wrote into that a hit can rebuild, is fingerprinted by its entries
-//!    whether or not the task read it, and must not hold anything the task
-//!    didn't leave there. What a hit can't rebuild in a folder the task
-//!    created, such as files renamed into it, must be as the task left it.
+//! entries. What a hit can rebuild may be missing (see
+//! [`super::rebuildable`]), and so may an entry of a listed folder that a hit
+//! can rebuild. What a hit can't rebuild in a folder the task created, such as
+//! the contents of a folder renamed into place, must be as the task left it,
+//! whether or not the task read it. A hit doesn't delete, so a folder the task
+//! didn't list may hold files it didn't leave there.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -177,7 +174,7 @@ impl PostRunFingerprint {
         tracked_envs: BTreeMap<Str, Option<EnvValueHash>>,
         tracked_env_queries: BTreeMap<TrackedEnvQuery, BTreeMap<Str, EnvValueHash>>,
     ) -> anyhow::Result<Self> {
-        let mut inferred_inputs = output_folder_inputs(rebuildable, base_dir, globbed_inputs)?;
+        let mut inferred_inputs = unrebuildable_inputs(rebuildable, base_dir, globbed_inputs)?;
         let read_inputs = inferred_path_reads
             .par_iter()
             .filter(|(path, _)| {
@@ -290,25 +287,17 @@ impl PostRunFingerprint {
     }
 }
 
-/// Rule 2's inputs: every output folder by its entries, and what a hit can't
-/// rebuild in a folder the task created as the task left it. Symlinks are
-/// fingerprinted by what they point to but not descended into.
-fn output_folder_inputs(
+/// What a hit can't rebuild in a folder the task created, as the task left
+/// it, read or not: the hit won't put it back, so it must already be there.
+/// Symlinks are fingerprinted by what they point to but not descended into.
+fn unrebuildable_inputs(
     rebuildable: &Rebuildable,
     base_dir: &AbsolutePath,
     globbed_inputs: &BTreeMap<RelativePathBuf, u64>,
 ) -> anyhow::Result<HashMap<RelativePathBuf, InputFingerprint>> {
     let mut inputs = HashMap::default();
     let mut unrebuildable: Vec<(RelativePathBuf, DirEntryKind)> = Vec::new();
-    for (path, folder) in rebuildable.output_folders() {
-        inputs.insert(
-            path.clone(),
-            InputFingerprint {
-                state: PathFingerprint::Folder(Some(folder.entries.clone())),
-                rebuildable: folder.is_rebuildable(),
-                rebuildable_entries: folder.rebuildable_entries.clone(),
-            },
-        );
+    for (path, folder) in rebuildable.created_folders() {
         unrebuildable.extend(unrebuildable_entries(
             path,
             &folder.entries,
@@ -851,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn created_folder_may_lack_entries_but_not_gain_them() {
+    fn created_folder_the_task_did_not_list_may_lack_or_gain_entries() {
         // Vite checks `dist` before creating it; rolldown creates
         // `dist/assets` and writes into it without looking at it.
         let (_tmp, root) = workspace(&["package.json", "dist/index.html", "dist/assets/main.js"]);
@@ -866,14 +855,15 @@ mod tests {
             ],
             "",
         );
-        assert!(fingerprint.inferred_inputs.contains_key(&rel("dist/assets")));
+        assert!(!fingerprint.inferred_inputs.contains_key(&rel("dist/assets")));
         assert_eq!(validate(&fingerprint, &root), None);
 
         std::fs::remove_file(root.join("dist/assets/main.js")).unwrap();
         assert_eq!(validate(&fingerprint, &root), None);
+        // A hit doesn't delete: a file another step or an older build left
+        // in an unlisted output folder stays.
         std::fs::write(root.join("dist/assets/stale.js"), "").unwrap();
-        assert_eq!(validate(&fingerprint, &root).as_deref(), Some("Added dist/assets/stale.js"));
-        std::fs::remove_file(root.join("dist/assets/stale.js")).unwrap();
+        assert_eq!(validate(&fingerprint, &root), None);
 
         std::fs::remove_dir_all(root.join("dist")).unwrap();
         assert_eq!(validate(&fingerprint, &root), None);

@@ -1,7 +1,7 @@
 [[e2e]]
-name = "created_dist_may_be_missing_or_incomplete_but_not_stale"
+name = "created_dist_may_be_missing_or_incomplete"
 comment = """
-`vite build` creates `dist`, so the cache entry accepts a tree without `dist` (a clean checkout) and restores it on a hit. A `dist` that exists may be missing some of its entries, which the hit restores, but may not contain anything the build did not leave there: a stale chunk makes the entry miss, and the real build removes the chunk. A build on a tree that already has `dist` empties it and fills it again, so `dist` holds only what the build wrote, and that entry catches a stale file too.
+`vite build` creates `dist`, so the cache entry accepts a tree without `dist` (a clean checkout) and restores it on a hit, and a `dist` missing some of its entries, which the hit restores. A hit doesn't delete: a chunk an older build left in `dist` stays after a hit, until `dist` is deleted.
 """
 ignore = true
 steps = [
@@ -56,26 +56,26 @@ steps = [
     "vt",
     "run",
     "build",
-  ], comment = "cache miss: dist/ is not as the build left it" },
+  ], comment = "cache hit: a hit doesn't delete files" },
   { argv = [
     "vtt",
     "stat-file",
     "dist/assets/stale.js",
-  ], comment = "the real build emptied dist/" },
+  ], comment = "still there" },
   { argv = [
     "vtt",
-    "write-file",
-    "dist/stale.html",
-    "stale",
-  ], comment = "a page left by an older build" },
+    "rm",
+    "-rf",
+    "dist",
+  ], comment = "delete dist/ to get a clean one" },
   { argv = [
     "vt",
     "run",
     "build",
-  ], comment = "cache miss: dist/ held only what the build wrote, so it may not hold anything else" },
+  ], comment = "cache hit: restores dist/" },
   { argv = [
     "vtt",
     "stat-file",
-    "dist/stale.html",
-  ], comment = "the real build emptied dist/ again" },
+    "dist/assets/stale.js",
+  ], comment = "gone: the hit restored only what the build wrote" },
 ]

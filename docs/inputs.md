@@ -233,10 +233,13 @@ If you encounter a case where fspy fails to detect a file read, please [report t
 
 ### How Tracked Paths Are Compared
 
-Every path a task reads is an input, and every path it writes is an output. Inputs are compared with how the task left them, after the run, so a task that writes a file it read is cached: `tsdown` writes `exports` into `package.json`, the next run hits, and editing `package.json` runs the task again. Two rules decide what else matches:
+Every path a task reads is an input, and every path it writes is an output. Inputs are compared with how the task left them, after the run, so a task that writes a file it read is cached: `tsdown` writes `exports` into `package.json`, the next run hits, and editing `package.json` runs the task again.
 
-- **What a cache hit can rebuild may be missing.** A hit restores the outputs, so a file the task created doesn't have to be there, and neither does a folder the task created or wrote into that holds nothing but such files, such as `dist`. A clean checkout without `dist` hits and gets `dist` back, and so does a tree with one chunk deleted from it. In a folder the task listed, an entry the hit can rebuild may be missing too: `eslint --cache .` lists the project directory and creates `.eslintcache` in it, and a clean checkout without `.eslintcache` hits.
-- **A cache hit never deletes.** A folder the task created, or one a hit can rebuild, may not hold anything the task didn't leave there, whether or not the task read it: a stale chunk from an older build makes the entry miss, and the real build removes it. Anything in a folder the task created that a hit can't rebuild, such as files a tool renamed into it, must be as the task left it.
+**What a cache hit can rebuild may be missing.** A hit restores the outputs, so a file the task created doesn't have to be there, and neither does a folder the task created or wrote into that holds nothing but such files, such as `dist`. A clean checkout without `dist` hits and gets `dist` back, and so does a tree with one chunk deleted from it. In a folder the task listed, an entry the hit can rebuild may be missing too: `eslint --cache .` lists the project directory and creates `.eslintcache` in it, and a clean checkout without `.eslintcache` hits.
+
+What a hit can't rebuild in a folder the task created must already be there, as the task left it, even if the task didn't read it: the contents of a folder a tool renamed into place, for example, which the task wrote under another name.
+
+A cache hit doesn't delete anything. A file an older build left in an output folder stays after a hit, unless the task listed that folder: delete the folder first when you need it clean.
 
 A path the task created is one that was missing when the task wrote it, so a build that deletes `dist` and writes it again created it. A path excluded from `output` is not restored; if the task created it, it may be missing, and nothing in it is checked.
 
