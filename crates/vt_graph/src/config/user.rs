@@ -60,12 +60,22 @@ fn deserialize_glob_entry<'de, D: Deserializer<'de>, T>(
     auto: fn(AutoTracking) -> T,
 ) -> Result<T, D::Error> {
     /// Both object forms in one struct, so a mistyped key is reported with every accepted key.
+    /// A field is `None` only when it's absent, so `null` is rejected as it is in either form.
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct EntryObject {
+        #[serde(default, deserialize_with = "present")]
         pattern: Option<Str>,
+        #[serde(default, deserialize_with = "present")]
         base: Option<InputBase>,
+        #[serde(default, deserialize_with = "present")]
         auto: Option<bool>,
+    }
+
+    fn present<'de, D: Deserializer<'de>, V: Deserialize<'de>>(
+        deserializer: D,
+    ) -> Result<Option<V>, D::Error> {
+        V::deserialize(deserializer).map(Some)
     }
 
     UntaggedEnumVisitor::new()
@@ -1079,6 +1089,19 @@ mod tests {
         });
         let result = serde_json::from_value::<EnabledCacheConfig>(user_config_json);
         assert!(result.is_err(), "mixing auto and pattern/base fields should produce an error");
+    }
+
+    #[test]
+    fn test_input_null_field_error() {
+        // An explicit `null` is rejected, not treated as an absent field
+        for entry in [
+            json!({ "pattern": "src/**", "base": "workspace", "auto": null }),
+            json!({ "auto": false, "pattern": null }),
+        ] {
+            let user_config_json = json!({ "input": [entry] });
+            let result = serde_json::from_value::<EnabledCacheConfig>(user_config_json);
+            assert!(result.is_err(), "a null field should produce an error");
+        }
     }
 
     #[test]
