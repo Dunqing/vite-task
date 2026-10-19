@@ -69,7 +69,7 @@ fn deserialize_glob_entry<'de, D: Deserializer<'de>, T>(
     }
 
     UntaggedEnumVisitor::new()
-        .expecting("a glob pattern, `{ pattern, base }`, or `{ auto }`")
+        .expecting("a glob pattern, `{ pattern, base }`, or `{ auto: true }`")
         .string(|pattern| Ok(glob(pattern.into())))
         .map(|map| match map.deserialize::<EntryObject>()? {
             EntryObject { pattern: Some(pattern), base: Some(base), auto: None } => {
@@ -147,13 +147,16 @@ pub enum UserDependsOnFrom {
 impl<'de> Deserialize<'de> for UserDependsOnFrom {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         UntaggedEnumVisitor::new()
-            .expecting("a package.json dependency field or a non-empty array of them")
+            .expecting(
+                "a package.json dependency field name, such as `dependencies` or \
+                 `devDependencies`, or a non-empty array of them",
+            )
             .string(|field| {
                 UserDependencyType::deserialize(field.into_deserializer()).map(Self::Single)
             })
             .seq(|seq| {
                 Vec1::try_from_vec(seq.deserialize()?).map(Self::Multiple).map_err(|_| {
-                    de::Error::invalid_length(0, &"at least one package.json dependency field")
+                    de::Error::invalid_length(0, &"at least one package.json dependency field name")
                 })
             })
             .deserialize(deserializer)
@@ -450,56 +453,51 @@ impl<'de> Deserialize<'de> for UserTaskDefinition {
 /// Setting it in a package's config will result in an error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 // TS derive macro generates code using std types that clippy disallows; skip derive during linting
-#[cfg_attr(all(test, not(clippy)), derive(TS), ts(optional_fields, untagged))]
+#[cfg_attr(all(test, not(clippy)), derive(TS), ts(untagged))]
 pub enum UserGlobalCacheConfig {
     Bool(bool),
     /// Detailed cache configuration with separate control for scripts and tasks.
-    Detailed {
-        /// Enable caching for package.json scripts not defined in the `tasks` map.
-        ///
-        /// When `false`, package.json scripts will not be cached.
-        /// When `true`, package.json scripts will be cached with default settings.
-        ///
-        /// Default: `false`
-        scripts: Option<bool>,
-
-        /// Global cache kill switch for task entries.
-        ///
-        /// When `false`, overrides all tasks to disable caching, even tasks with `cache: true`
-        /// or a `cache` object.
-        /// When `true`, respects each task's individual `cache` setting
-        /// (each task's `cache` defaults to `true` if omitted).
-        ///
-        /// Default: `true`
-        tasks: Option<bool>,
-
-        /// Remote cache shared by tasks in the workspace.
-        // Parsed but left out of the public types while remote caching is unreleased.
-        #[cfg_attr(all(test, not(clippy)), ts(skip))]
-        remote: Option<UserRemoteCacheConfig>,
-    },
+    Detailed(#[cfg_attr(all(test, not(clippy)), ts(inline))] DetailedGlobalCacheConfig),
 }
 
 impl<'de> Deserialize<'de> for UserGlobalCacheConfig {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        /// The fields of [`UserGlobalCacheConfig::Detailed`].
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Detailed {
-            scripts: Option<bool>,
-            tasks: Option<bool>,
-            remote: Option<UserRemoteCacheConfig>,
-        }
-
         UntaggedEnumVisitor::new()
             .expecting("a boolean or an object of cache settings")
             .bool(|enabled| Ok(Self::Bool(enabled)))
-            .map(|map| {
-                let Detailed { scripts, tasks, remote } = map.deserialize()?;
-                Ok(Self::Detailed { scripts, tasks, remote })
-            })
+            .map(|map| map.deserialize().map(Self::Detailed))
             .deserialize(deserializer)
     }
+}
+
+/// Detailed root-level cache configuration with separate control for scripts and tasks.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+// TS derive macro generates code using std types that clippy disallows; skip derive during linting
+#[cfg_attr(all(test, not(clippy)), derive(TS), ts(optional_fields))]
+#[serde(deny_unknown_fields)]
+pub struct DetailedGlobalCacheConfig {
+    /// Enable caching for package.json scripts not defined in the `tasks` map.
+    ///
+    /// When `false`, package.json scripts will not be cached.
+    /// When `true`, package.json scripts will be cached with default settings.
+    ///
+    /// Default: `false`
+    pub scripts: Option<bool>,
+
+    /// Global cache kill switch for task entries.
+    ///
+    /// When `false`, overrides all tasks to disable caching, even tasks with `cache: true`
+    /// or a `cache` object.
+    /// When `true`, respects each task's individual `cache` setting
+    /// (each task's `cache` defaults to `true` if omitted).
+    ///
+    /// Default: `true`
+    pub tasks: Option<bool>,
+
+    /// Remote cache shared by tasks in the workspace.
+    // Parsed but left out of the public types while remote caching is unreleased.
+    #[cfg_attr(all(test, not(clippy)), ts(skip))]
+    pub remote: Option<UserRemoteCacheConfig>,
 }
 
 /// Resolved global cache configuration with concrete values.
@@ -526,7 +524,11 @@ impl ResolvedGlobalCacheConfig {
             Some(UserGlobalCacheConfig::Bool(false)) => {
                 Self { scripts: false, tasks: false, remote_url: None }
             }
-            Some(UserGlobalCacheConfig::Detailed { scripts, tasks, remote }) => Self {
+            Some(UserGlobalCacheConfig::Detailed(DetailedGlobalCacheConfig {
+                scripts,
+                tasks,
+                remote,
+            })) => Self {
                 scripts: scripts.unwrap_or(false),
                 tasks: tasks.unwrap_or(true),
                 remote_url: remote.as_ref().map(|remote| Arc::clone(&remote.url)),
@@ -1234,7 +1236,7 @@ mod tests {
             ),
             (
                 json!({ "command": "echo", "dependsOn": [{ "task": "build", "from": [] }] }),
-                "invalid length 0, expected at least one package.json dependency field",
+                "invalid length 0, expected at least one package.json dependency field name",
             ),
             (
                 json!({
@@ -1257,7 +1259,7 @@ mod tests {
             (
                 json!({ "command": "echo", "cache": { "output": [123] } }),
                 "invalid type: integer `123`, expected a glob pattern, `{ pattern, base }`, or \
-                 `{ auto }`",
+                 `{ auto: true }`",
             ),
         ];
         for (task, expected) in cases {
