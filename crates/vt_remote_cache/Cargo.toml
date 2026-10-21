@@ -13,8 +13,8 @@ bytes = { workspace = true }
 ciborium = { workspace = true }
 # `rustls-no-provider` selects rustls with rustls-platform-verifier, which
 # verifies certificates using the operating system's trust store. The crypto
-# provider is installed in `Client::new`. deny.toml bans `webpki-roots` and
-# `webpki-root-certs` for every platform CI builds.
+# provider is installed in `Client::new`. The vendored verifier does not
+# depend on `webpki-roots` or `webpki-root-certs`; deny.toml bans both.
 reqwest = { workspace = true, features = [
   "http2",
   "multipart",
