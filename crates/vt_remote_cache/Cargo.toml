@@ -11,6 +11,10 @@ rust-version.workspace = true
 base64 = { workspace = true }
 bytes = { workspace = true }
 ciborium = { workspace = true }
+# `rustls-no-provider` selects rustls with rustls-platform-verifier, which
+# verifies certificates using the operating system's trust store. The crypto
+# provider is installed in `Client::new`. deny.toml bans `webpki-roots` and
+# `webpki-root-certs` for every platform CI builds.
 reqwest = { workspace = true, features = [
   "http2",
   "multipart",

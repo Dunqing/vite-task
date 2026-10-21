@@ -70,8 +70,6 @@ exceptions = [
   # Each entry is the crate and version constraint, and its specific allow
   # list
   # { allow = ["Zlib"], name = "adler32", version = "*" },
-  # Mozilla's root certificates, used by rustls-platform-verifier on wasm32 only.
-  { allow = ["CDLA-Permissive-2.0"], name = "webpki-root-certs" },
 ]
 
 # Some crates don't have (easily) machine readable licensing information,
@@ -145,6 +143,13 @@ deny = [
   # Wrapper crates can optionally be specified to allow the crate when it
   # is a direct dependency of the otherwise banned crate
   # { name = "ansi_term", version = "=0.11.0", wrappers = [] },
+  #
+  # Compiled-in Mozilla root certificates. HTTPS verification uses the
+  # operating system's trust store through rustls-platform-verifier.
+  # Neither crate is in the graph for the targets listed below. This ban
+  # fails if a shipping build starts depending on an embedded trust store.
+  { name = "webpki-roots" },
+  { name = "webpki-root-certs" },
 ]
 
 # List of features to allow/deny
@@ -226,6 +231,19 @@ targets = [
   # particular target. target_features are currently not validated against
   # the actual valid features supported by the target architecture.
   # { triple = "wasm32-unknown-unknown", features = ["atomics"] },
+  #
+  # Platforms CI builds. Limiting the graph to these drops dependencies that
+  # are not linked into those builds. rustls-platform-verifier depends on
+  # webpki-root-certs only for wasm32, and reqwest does not use that verifier
+  # on wasm, so the embedded roots are absent here. The bans above fail if
+  # one of these targets starts depending on them.
+  { triple = "x86_64-unknown-linux-gnu" },
+  { triple = "x86_64-unknown-linux-musl" },
+  { triple = "aarch64-unknown-linux-musl" },
+  { triple = "x86_64-apple-darwin" },
+  { triple = "aarch64-apple-darwin" },
+  { triple = "x86_64-pc-windows-msvc" },
+  { triple = "x86_64-unknown-freebsd" },
 ]
 # When creating the dependency graph used as the source of truth when checks are
 # executed, this field can be used to prune crates from the graph, removing them
