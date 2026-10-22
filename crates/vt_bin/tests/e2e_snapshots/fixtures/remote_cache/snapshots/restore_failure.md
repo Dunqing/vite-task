@@ -34,7 +34,7 @@ The remote hit can't be restored, so the task fails.
 
 ```
 $ vtt write-file dist/output.txt built ◉ remote cache hit, replaying
-✗ Cache restore failed: failed to extract the output archive: failed to unpack `<workspace>/dist/output.txt`: failed to unpack `dist/output.txt` into `<workspace>/dist/output.txt`: <os error>
+✗ Cache restore failed: couldn't write `dist/output.txt`: <os error>
 
 [remote-cache] POST /fetch 200 exact
 [remote-cache] GET /blob/1 200
@@ -60,9 +60,7 @@ Task Details:
   [1] remote-cache#build: $ vtt write-file dist/output.txt built
       → Remote cache hit, but the outputs couldn't be restored
       ✗ Error: Cache restore failed
-        ↳ failed to extract the output archive
-        ↳ failed to unpack `<workspace>/dist/output.txt`
-        ↳ failed to unpack `dist/output.txt` into `<workspace>/dist/output.txt`
+        ↳ couldn't write `dist/output.txt`
         ↳ <os error>
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```

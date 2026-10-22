@@ -1,12 +1,32 @@
 //! Output archive creation and extraction using tar + zstd compression.
 
 use std::{
+    cell::Cell,
     fs::File,
     io::{self, Read},
     path::Component,
 };
 
 use vt_path::{AbsolutePath, RelativePathBuf};
+use vt_str::Str;
+
+/// Why extracting an output archive failed.
+#[derive(Debug, thiserror::Error)]
+pub enum RestoreError {
+    /// The archive is missing or doesn't decode. Clearing the cache removes
+    /// the entry that points to it.
+    #[error("failed to extract the output archive")]
+    Archive(#[source] anyhow::Error),
+    /// A file from the archive couldn't be written into the workspace, for
+    /// example because a directory stands where it goes. Clearing the cache
+    /// wouldn't help.
+    #[error("couldn't write `{path}`")]
+    Workspace {
+        path: Str,
+        #[source]
+        source: anyhow::Error,
+    },
+}
 
 /// Create a tar.zst archive from workspace-relative output file paths.
 ///
@@ -55,24 +75,52 @@ pub fn create_output_archive(
 ///
 /// # Errors
 ///
-/// Returns an error if opening the archive or extracting entries fails.
+/// Returns [`RestoreError::Archive`] if the archive can't be opened or
+/// decoded, and [`RestoreError::Workspace`] if a file can't be written.
 pub fn extract_output_archive(
     workspace_root: &AbsolutePath,
     archive_path: &AbsolutePath,
-) -> anyhow::Result<()> {
-    let file = File::open(archive_path.as_path())?;
-    let decoder = zstd::Decoder::new(file)?;
-    let mut archive = tar::Archive::new(decoder);
+) -> Result<(), RestoreError> {
+    let archive_error = |err: io::Error| RestoreError::Archive(err.into());
+    let file = File::open(archive_path.as_path()).map_err(archive_error)?;
+    let read_failed = Cell::new(false);
+    let reader = ArchiveReader {
+        inner: zstd::Decoder::new(file).map_err(archive_error)?,
+        failed: &read_failed,
+    };
+    let mut archive = tar::Archive::new(reader);
 
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        if entry.header().entry_type().is_file() {
-            unpack_file_atomically(&mut entry, workspace_root)?;
+    for entry in archive.entries().map_err(archive_error)? {
+        let mut entry = entry.map_err(archive_error)?;
+        let path = vt_str::format!("{}", entry.path().map_err(archive_error)?.display());
+        let unpacked = if entry.header().entry_type().is_file() {
+            unpack_file_atomically(&mut entry, workspace_root)
         } else {
-            entry.unpack_in(workspace_root.as_path())?;
+            entry.unpack_in(workspace_root.as_path()).map(drop).map_err(anyhow::Error::from)
+        };
+        if let Err(err) = unpacked {
+            return Err(if read_failed.get() {
+                RestoreError::Archive(err)
+            } else {
+                RestoreError::Workspace { path, source: err }
+            });
         }
     }
     Ok(())
+}
+
+/// The archive's reader, noting whether a read failed. Unpacking an entry
+/// both reads the archive and writes the workspace, and its error doesn't say
+/// which one failed.
+struct ArchiveReader<'a, R> {
+    inner: R,
+    failed: &'a Cell<bool>,
+}
+
+impl<R: Read> Read for ArchiveReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buf).inspect_err(|_| self.failed.set(true))
+    }
 }
 
 /// Unpack a regular file entry by writing a temporary file next to the target
@@ -441,5 +489,75 @@ mod tests {
         for corrupt in [&archive[..archive.len() - 1], b"corrupt"] {
             assert!(check_output_archive(corrupt).is_err());
         }
+    }
+
+    /// Archives `dist/out.txt` (about 100 KB, incompressible) and returns the
+    /// temp directory, the archive's path and an empty workspace.
+    fn archive_and_workspace() -> (tempfile::TempDir, AbsolutePathBuf, AbsolutePathBuf) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = AbsolutePathBuf::new(tmp.path().to_path_buf()).unwrap();
+        let output = RelativePathBuf::new("dist/out.txt").unwrap();
+        let path = dir.join(&output);
+        std::fs::create_dir_all(path.as_path().parent().unwrap()).unwrap();
+        let content: Vec<u8> =
+            (0..100_000_u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+        std::fs::write(path.as_path(), &content).unwrap();
+        let archive_path = dir.join("output.tar.zst");
+        create_output_archive(&dir, &[output], &archive_path).unwrap();
+        let workspace = AbsolutePathBuf::new(tmp.path().join("workspace")).unwrap();
+        std::fs::create_dir(workspace.as_path()).unwrap();
+        (tmp, archive_path, workspace)
+    }
+
+    #[test]
+    fn a_missing_or_corrupt_archive_is_an_archive_error() {
+        let (_tmp, archive_path, workspace) = archive_and_workspace();
+        let archive = std::fs::read(archive_path.as_path()).unwrap();
+        std::fs::write(archive_path.as_path(), &archive[..archive.len() / 2]).unwrap();
+        assert!(matches!(
+            extract_output_archive(&workspace, &archive_path),
+            Err(RestoreError::Archive(_))
+        ));
+
+        // Damage far into a large entry fails to decode while the file is
+        // being unpacked, when the workspace is also being written, instead
+        // of in the decoder's read-ahead of the header.
+        let output = RelativePathBuf::new("dist/out.txt").unwrap();
+        let source = archive_path.as_path().parent().unwrap();
+        let source = AbsolutePathBuf::new(source.to_path_buf()).unwrap();
+        let lines: Vec<u8> =
+            (0..400_000).flat_map(|i| vt_str::format!("line {i}\n").as_bytes().to_vec()).collect();
+        std::fs::write(source.join(&output).as_path(), lines).unwrap();
+        create_output_archive(&source, &[output], &archive_path).unwrap();
+        let mut damaged = std::fs::read(archive_path.as_path()).unwrap();
+        let middle = damaged.len() / 2;
+        for byte in &mut damaged[middle..middle + 64] {
+            *byte = !*byte;
+        }
+        std::fs::write(archive_path.as_path(), &damaged).unwrap();
+        let result = extract_output_archive(&workspace, &archive_path);
+        assert!(matches!(result, Err(RestoreError::Archive(_))), "{result:?}");
+
+        std::fs::remove_file(archive_path.as_path()).unwrap();
+        assert!(matches!(
+            extract_output_archive(&workspace, &archive_path),
+            Err(RestoreError::Archive(_))
+        ));
+    }
+
+    #[test]
+    fn a_directory_in_the_way_is_a_workspace_error() {
+        let (_tmp, archive_path, workspace) = archive_and_workspace();
+        let in_the_way = workspace.join("dist/out.txt/stale");
+        std::fs::create_dir_all(in_the_way.as_path()).unwrap();
+
+        let Err(RestoreError::Workspace { path, .. }) =
+            extract_output_archive(&workspace, &archive_path)
+        else {
+            panic!("a directory where an output file goes should block the restore");
+        };
+        assert_eq!(path.as_str(), "dist/out.txt");
+        // Nothing in the way is removed.
+        assert!(in_the_way.as_path().is_dir());
     }
 }

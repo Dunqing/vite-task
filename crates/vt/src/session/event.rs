@@ -8,15 +8,17 @@ use vt_path::RelativePathBuf;
 use vt_server::Error as IpcServerError;
 use vt_str::Str;
 
-use super::cache::{CacheHitSource, CacheMiss, remote::UploadError};
+use super::cache::{CacheHitSource, CacheMiss, archive::RestoreError, remote::UploadError};
 
 /// The cache operation that failed.
 #[derive(Debug)]
 pub enum CacheErrorKind {
     /// Cache lookup (`try_hit`) failed.
     Lookup,
-    /// Restoring the output files of a remote cache hit failed. A local hit
-    /// fails with [`ExecutionError::LocalCacheRestore`] instead.
+    /// The output archive of a remote cache hit couldn't be extracted. A
+    /// local hit fails with [`ExecutionError::LocalCacheRestore`] instead,
+    /// and either fails with [`ExecutionError::CacheRestoreBlocked`] when a
+    /// file can't be written.
     Restore,
     /// Writing the cache entry failed after successful execution.
     Update,
@@ -46,15 +48,21 @@ pub enum ExecutionError {
         source: anyhow::Error,
     },
 
-    /// Restoring the output files of a local cache hit failed. The entry
-    /// stays in the cache, so later runs fail the same way until the cache is
-    /// cleared.
+    /// The output archive of a local cache hit is missing or doesn't
+    /// decode. The entry stays in the cache, so later runs fail the same way
+    /// until the cache is cleared.
     #[error("Cache restore failed. Run `{program_name} cache clean` to clear the cache")]
     LocalCacheRestore {
         program_name: Str,
         #[source]
         source: anyhow::Error,
     },
+
+    /// A file from a cache hit's outputs couldn't be written into the
+    /// workspace. The archive is fine, so clearing the cache wouldn't help;
+    /// the source names the file and the reason.
+    #[error("Cache restore failed")]
+    CacheRestoreBlocked(#[source] RestoreError),
 
     /// The OS failed to spawn the child process (e.g., command not found).
     #[error("Failed to spawn process")]

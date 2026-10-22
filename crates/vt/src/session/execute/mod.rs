@@ -32,7 +32,7 @@ use self::{
     spawn::{ChildHandle, ChildOutcome, SpawnStdio, spawn},
 };
 use super::{
-    cache::{CacheHit, CacheHitSource, CacheMiss, ExecutionCache},
+    cache::{CacheHit, CacheHitSource, CacheMiss, ExecutionCache, archive::RestoreError},
     event::{
         CacheDisabledReason, CacheErrorKind, CacheNotUpdatedReason, CacheStatus, CacheUpdateStatus,
         ExecutionError,
@@ -605,13 +605,18 @@ async fn replay_cache_hit(
     // can't be written. The task fails because the cache promised the
     // outputs would be restored.
     if let Err(err) = cache.restore(cache_metadata, hit, workspace_root, cache_dir).await {
-        let error = match hit.source {
-            CacheHitSource::Local => {
-                ExecutionError::LocalCacheRestore { program_name: program_name.into(), source: err }
+        let error = match (err, hit.source) {
+            // Clearing the cache wouldn't help: the workspace is in the way.
+            (err @ RestoreError::Workspace { .. }, _) => ExecutionError::CacheRestoreBlocked(err),
+            (err @ RestoreError::Archive(_), CacheHitSource::Local) => {
+                ExecutionError::LocalCacheRestore {
+                    program_name: program_name.into(),
+                    source: err.into(),
+                }
             }
             // Not recorded locally, so there's no entry to clear.
-            CacheHitSource::Remote => {
-                ExecutionError::Cache { kind: CacheErrorKind::Restore, source: err }
+            (err @ RestoreError::Archive(_), CacheHitSource::Remote) => {
+                ExecutionError::Cache { kind: CacheErrorKind::Restore, source: err.into() }
             }
         };
         return Report::Failed {

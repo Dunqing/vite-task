@@ -73,6 +73,36 @@ steps = [
 ]
 
 [[e2e]]
+name = "output_globs___blocked_restore_names_the_file"
+comment = """
+When a directory stands where an archived output file goes, restoring fails and names the file. It doesn't suggest clearing the cache, which wouldn't help.
+"""
+steps = [
+  { argv = [
+    "vt",
+    "run",
+    "build",
+  ], comment = "first run — cache miss, writes dist/output.txt" },
+  [
+    "vtt",
+    "rm",
+    "-rf",
+    "dist",
+  ],
+  { argv = [
+    "vtt",
+    "mkdir",
+    "-p",
+    "dist/output.txt/stale",
+  ], comment = "a directory where the output file goes" },
+  { argv = [
+    "vt",
+    "run",
+    "build",
+  ], comment = "cache hit — restoring fails and names the file" },
+]
+
+[[e2e]]
 name = "output_globs___old_archive_removed_on_rewrite"
 comment = """
 When a cached task re-runs (cache miss because an input changed), it writes a new archive and the previous archive file is cleaned up. After two cache-missing runs of the same task the cache directory still contains only one `.tar.zst` archive.

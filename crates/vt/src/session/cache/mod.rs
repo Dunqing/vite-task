@@ -592,7 +592,7 @@ impl ExecutionCache {
         hit: &CacheHit,
         workspace_root: &AbsolutePath,
         cache_dir: &AbsolutePath,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), archive::RestoreError> {
         if let Some(archive_name) = &hit.value.output_archive {
             let archive_path = cache_dir.join(archive_name.as_str());
             if let Err(err) = archive::extract_output_archive(workspace_root, &archive_path) {
@@ -600,7 +600,7 @@ impl ExecutionCache {
                     // Best-effort: the file may already be missing.
                     let _ = std::fs::remove_file(archive_path.as_path());
                 }
-                return Err(err.context("failed to extract the output archive"));
+                return Err(err);
             }
         }
 
